@@ -100,18 +100,31 @@ func fetchObjectAndSecret(o opts, stateStoreRef client.ObjectKey, stateStore Sta
 		namespace = v1alpha1.SystemNamespace
 	}
 
-	secret := &v1.Secret{}
 	secretRef := types.NamespacedName{
 		Name:      stateStore.GetSecretRef().Name,
 		Namespace: namespace,
 	}
 
-	if err := o.client.Get(o.ctx, secretRef, secret); err != nil {
-		o.logger.Error(err, "unable to fetch resource", "resourceKind", stateStore.GetObjectKind(), "secretRef", secretRef)
+	secret, err := fetchSecret(o, secretRef)
+	if err != nil {
 		return nil, err
 	}
 
 	return secret, nil
+}
+
+func fetchSecret(o opts, secretref client.ObjectKey) (*v1.Secret, error) {
+
+	secret := &v1.Secret{}
+	secretRef := types.NamespacedName{
+		Name:      secretref.Name,
+		Namespace: secretref.Namespace,
+	}
+
+	if err := o.client.Get(o.ctx, secretRef, secret); err != nil {
+		o.logger.Error(err, "unable to fetch resource", "secretRef", secretRef)
+		return nil, err
+	}
 }
 
 func newWriter(o opts, destination v1alpha1.Destination) (writers.StateStoreWriter, error) {
