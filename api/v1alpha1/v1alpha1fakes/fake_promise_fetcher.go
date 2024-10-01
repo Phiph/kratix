@@ -8,10 +8,10 @@ import (
 )
 
 type FakePromiseFetcher struct {
-	FromURLStub        func(string) (*v1alpha1.Promise, error)
+	FromURLStub        func(v1alpha1.FromURLParams) (*v1alpha1.Promise, error)
 	fromURLMutex       sync.RWMutex
 	fromURLArgsForCall []struct {
-		arg1 string
+		arg1 v1alpha1.FromURLParams
 	}
 	fromURLReturns struct {
 		result1 *v1alpha1.Promise
@@ -25,11 +25,11 @@ type FakePromiseFetcher struct {
 	invocationsMutex sync.RWMutex
 }
 
-func (fake *FakePromiseFetcher) FromURL(arg1 string) (*v1alpha1.Promise, error) {
+func (fake *FakePromiseFetcher) FromURL(arg1 v1alpha1.FromURLParams) (*v1alpha1.Promise, error) {
 	fake.fromURLMutex.Lock()
 	ret, specificReturn := fake.fromURLReturnsOnCall[len(fake.fromURLArgsForCall)]
 	fake.fromURLArgsForCall = append(fake.fromURLArgsForCall, struct {
-		arg1 string
+		arg1 v1alpha1.FromURLParams
 	}{arg1})
 	stub := fake.FromURLStub
 	fakeReturns := fake.fromURLReturns
@@ -50,13 +50,13 @@ func (fake *FakePromiseFetcher) FromURLCallCount() int {
 	return len(fake.fromURLArgsForCall)
 }
 
-func (fake *FakePromiseFetcher) FromURLCalls(stub func(string) (*v1alpha1.Promise, error)) {
+func (fake *FakePromiseFetcher) FromURLCalls(stub func(v1alpha1.FromURLParams) (*v1alpha1.Promise, error)) {
 	fake.fromURLMutex.Lock()
 	defer fake.fromURLMutex.Unlock()
 	fake.FromURLStub = stub
 }
 
-func (fake *FakePromiseFetcher) FromURLArgsForCall(i int) string {
+func (fake *FakePromiseFetcher) FromURLArgsForCall(i int) v1alpha1.FromURLParams {
 	fake.fromURLMutex.RLock()
 	defer fake.fromURLMutex.RUnlock()
 	argsForCall := fake.fromURLArgsForCall[i]

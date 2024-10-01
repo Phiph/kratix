@@ -17,6 +17,7 @@ limitations under the License.
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -27,6 +28,8 @@ type PromiseReleaseSpec struct {
 	Version string `json:"version,omitempty"`
 	// +kubebuilder:default:={type: "http"}
 	SourceRef SourceRef `json:"sourceRef"`
+	// SecretRef specifies the Secret containing authentication credentials
+	SecretRef *corev1.SecretReference `json:"secretRef,omitempty"`
 }
 
 type SourceRef struct {

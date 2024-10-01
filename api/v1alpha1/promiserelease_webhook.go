@@ -52,7 +52,10 @@ func (r *PromiseRelease) ValidateCreate() (admission.Warnings, error) {
 		return nil, err
 	}
 
-	promise, err := promiseFetcher.FromURL(r.Spec.SourceRef.URL)
+	promise, err := promiseFetcher.FromURL(fetchers.FromURLParams{
+		URL:    r.Spec.SourceRef.URL,
+		Secret: r.Spec.SecretRef,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch promise: %w", err)
 	}

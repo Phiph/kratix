@@ -48,6 +48,20 @@ spec:
           spec:
             description: PromiseReleaseSpec defines the desired state of PromiseRelease
             properties:
+              secretRef:
+                description: SecretRef specifies the Secret containing authentication
+                  credentials
+                properties:
+                  name:
+                    description: name is unique within a namespace to reference a
+                      secret resource.
+                    type: string
+                  namespace:
+                    description: namespace defines the space within which the secret
+                      name must be unique.
+                    type: string
+                type: object
+                x-kubernetes-map-type: atomic
               sourceRef:
                 default:
                   type: http

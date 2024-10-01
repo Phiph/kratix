@@ -125,6 +125,8 @@ func fetchSecret(o opts, secretref client.ObjectKey) (*v1.Secret, error) {
 		o.logger.Error(err, "unable to fetch resource", "secretRef", secretRef)
 		return nil, err
 	}
+
+	return secret, nil
 }
 
 func newWriter(o opts, destination v1alpha1.Destination) (writers.StateStoreWriter, error) {

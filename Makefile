@@ -71,7 +71,7 @@ fast-quick-start: teardown ## Install Kratix without recreating the local cluste
 	RECREATE=false make quick-start
 
 quick-start: gitea-cli generate distribution ## Recreates the clusters and install Kratix
-	VERSION=dev DOCKER_BUILDKIT=1 ./scripts/quick-start.sh --local --git-and-minio
+	VERSION=dev DOCKER_BUILDKIT=1 ./scripts/quick-start.sh --local --git-and-minio --local-images
 
 prepare-platform-as-destination: ## Installs flux onto platform cluster and registers as a destination
 	./scripts/register-destination --with-label environment=platform --context kind-platform --name platform-cluster
