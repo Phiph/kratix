@@ -152,12 +152,15 @@ func (r *DynamicResourceRequestController) Reconcile(ctx context.Context, req ct
 		return ctrl.Result{}, err
 	}
 
+	// Set the promise-name label in-memory if missing. The actual API write
+	// is bundled with the finalizer Update below (or, if finalizers are
+	// already present, persisted directly here) — saving an entire
+	// reconcile cycle on every freshly-created RR.
 	resourceLabels := getResourceLabels(rr)
-	if resourceLabels[v1alpha1.PromiseNameLabel] != r.PromiseIdentifier {
-		if err := r.setPromiseLabels(ctx, promise.GetName(), rr, resourceLabels, logger); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{}, nil
+	promiseLabelMissing := resourceLabels[v1alpha1.PromiseNameLabel] != r.PromiseIdentifier
+	if promiseLabelMissing {
+		resourceLabels[v1alpha1.PromiseNameLabel] = r.PromiseIdentifier
+		rr.SetLabels(resourceLabels)
 	}
 
 	opts := opts{client: r.Client, ctx: ctx, logger: logger}
@@ -186,13 +189,26 @@ func (r *DynamicResourceRequestController) Reconcile(ctx context.Context, req ct
 	if resourceutil.FinalizersAreMissing(rr, r.getRRFinalizers()) {
 		finCtx, finSpan := otel.Tracer("kratix/dynamicRR").Start(ctx, "rr.addFinalizers")
 		opts.ctx = finCtx
+		// addFinalizers does a metadata Update, which also persists the
+		// promise-name label change we may have made above.
 		err := addFinalizers(opts, rr, r.getRRFinalizers())
 		finSpan.End()
 		opts.ctx = ctx
-		if apierrors.IsConflict(err) {
-			return fastRequeue, nil
+		if err != nil {
+			if apierrors.IsConflict(err) {
+				return fastRequeue, nil
+			}
+			return ctrl.Result{}, err
 		}
-		return ctrl.Result{}, err
+	} else if promiseLabelMissing {
+		// Finalizers were already present, so addFinalizers didn't run and
+		// we still need to persist the promise-name label.
+		if err := r.Client.Update(ctx, rr); err != nil {
+			if apierrors.IsConflict(err) {
+				return fastRequeue, nil
+			}
+			return ctrl.Result{}, err
+		}
 	}
 
 	if rr.GetDeletionTimestamp().IsZero() {
@@ -266,6 +282,7 @@ func (r *DynamicResourceRequestController) Reconcile(ctx context.Context, req ct
 		namespace,
 	)
 	jobOpts.SharedResourceCache = r.SharedResourceCache
+	jobOpts.SharedResourceScope = string(promise.GetUID())
 
 	passiveRequeue, err := reconcileConfigure(jobOpts)
 	if err != nil {
@@ -707,6 +724,14 @@ func (r *DynamicResourceRequestController) ensureConfigureWorkflowStatus(
 		statusChanged = true
 	}
 
+	// Initialise workflowsFailed=0 on first reconcile so the workflow library's
+	// reconcileWorkflowStatus does not have to issue a separate Status().Update
+	// solely to undrift the counter on a brand-new RR.
+	if resourceutil.GetWorkflowsCounterStatus(rr, "workflowsFailed") == -1 {
+		resourceutil.SetStatus(rr, logger, "workflowsFailed", int64(0))
+		statusChanged = true
+	}
+
 	workflowStatusChanged, err := ensureRRKratixWorkflowStatusIsSetup(rr, pipelineResources)
 	if err != nil {
 		return false, err
@@ -1053,6 +1078,7 @@ func (r *DynamicResourceRequestController) deleteResources(o opts, promise *v1al
 
 		jobOpts := workflow.NewOpts(o.ctx, o.client, r.EventRecorder, o.logger, resourceRequest, pipelineResources, "resource", r.NumberOfJobsToKeep, namespace)
 		jobOpts.SharedResourceCache = r.SharedResourceCache
+		jobOpts.SharedResourceScope = string(promise.GetUID())
 		requeue, err := reconcileDelete(jobOpts)
 		if err != nil {
 			r.handleDeletePipelineFailure(o, promise, resourceRequest, err)
@@ -1066,33 +1092,43 @@ func (r *DynamicResourceRequestController) deleteResources(o opts, promise *v1al
 		if err = o.client.Update(o.ctx, resourceRequest); err != nil {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{}, nil
+		// Fall through to attempt subsequent finalizer cleanups in the same
+		// reconcile. Each delete* helper is responsible for removing its own
+		// finalizer when its cleanup is complete; if not yet complete, we
+		// requeue at the end.
 	}
 
 	if controllerutil.ContainsFinalizer(resourceRequest, workFinalizer) {
-		err := r.deleteWork(o, resourceRequest, workFinalizer, namespace)
-		if err != nil {
+		if err := r.deleteWork(o, resourceRequest, workFinalizer, namespace); err != nil {
 			return ctrl.Result{}, err
 		}
-		return fastRequeue, nil
+		// Fall through. deleteWork removes the finalizer iff no Works remain.
+		// If Works are still being deleted, the finalizer stays and we'll
+		// requeue at the end.
 	}
 
 	if controllerutil.ContainsFinalizer(resourceRequest, removeAllWorkflowJobsFinalizer) {
-		err := r.deleteWorkflows(o, resourceRequest, removeAllWorkflowJobsFinalizer)
-		if err != nil {
+		if err := r.deleteWorkflows(o, resourceRequest, removeAllWorkflowJobsFinalizer); err != nil {
 			return ctrl.Result{}, err
 		}
-		return fastRequeue, nil
+		// Fall through. deleteWorkflows removes the finalizer iff all Jobs
+		// matching its label sets are gone.
 	}
 
 	if controllerutil.ContainsFinalizer(resourceRequest, resourceBindingFinalizer) {
-		err := r.deleteResourceBinding(o, resourceRequest, promise, resourceBindingFinalizer)
-		if err != nil {
+		if err := r.deleteResourceBinding(o, resourceRequest, promise, resourceBindingFinalizer); err != nil {
 			return ctrl.Result{}, err
 		}
-		return fastRequeue, nil
+		// Fall through. deleteResourceBinding removes the finalizer iff its
+		// cleanup is complete; if not yet complete, we requeue at the end.
 	}
 
+	// If all finalizers were removed in this reconcile, no requeue is needed —
+	// kubernetes will GC the RR. Otherwise, requeue to retry the cleanup paths
+	// that left their finalizers in place.
+	if resourceutil.FinalizersAreDeleted(resourceRequest, r.getRRFinalizers()) {
+		return ctrl.Result{}, nil
+	}
 	return fastRequeue, nil
 }
 
@@ -1549,16 +1585,6 @@ func shouldForcePipelineRun(completedCond *clusterv1.Condition, reconciliationIn
 	return completedCond != nil &&
 		completedCond.Status == v1.ConditionTrue &&
 		time.Since(completedCond.LastTransitionTime.Time) > reconciliationInterval
-}
-
-func (r *DynamicResourceRequestController) setPromiseLabels(ctx context.Context, promiseName string, rr *unstructured.Unstructured, resourceLabels map[string]string, logger logr.Logger) error {
-	resourceLabels[v1alpha1.PromiseNameLabel] = promiseName
-	rr.SetLabels(resourceLabels)
-	if err := r.Client.Update(ctx, rr); err != nil {
-		logging.Error(logger, err, "failed updating resource request with promise label")
-		return err
-	}
-	return nil
 }
 
 func (r *DynamicResourceRequestController) getRRFinalizers() []string {
