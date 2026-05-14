@@ -81,6 +81,9 @@ type PromiseReconciler struct {
 	ReconciliationInterval    time.Duration
 	EventRecorder             events.EventRecorder
 	ResourceBindingPinned     bool
+	// BreakerDefaults are applied to every dynamic resource-request controller's
+	// per-resource circuit breaker. Per-Promise annotations override these.
+	BreakerDefaults BreakerDefaults
 }
 
 const (

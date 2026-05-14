@@ -126,6 +126,13 @@ var secureMetrics bool
 var pprofAddr string
 var enableLeaderElection bool
 
+var (
+	circuitBreakerBurst      float64
+	circuitBreakerRefillRate float64
+	circuitBreakerCooldown   time.Duration
+	circuitBreakerEnabled    bool
+)
+
 // wrapConfigWithOTel wraps the Kubernetes REST config's HTTP transport with OpenTelemetry
 // instrumentation to automatically trace all Kubernetes API calls.
 func wrapConfigWithOTel(config *rest.Config) *rest.Config {
@@ -153,6 +160,17 @@ func main() {
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
+	flag.Float64Var(&circuitBreakerBurst, "circuit-breaker-burst", 100,
+		"Default token-bucket burst for per-resource circuit breakers. "+
+			"Overridable per Promise via the kratix.io/circuit-breaker-burst annotation.")
+	flag.Float64Var(&circuitBreakerRefillRate, "circuit-breaker-refill-rate", 1.0,
+		"Default token-bucket refill rate (tokens per second). "+
+			"Overridable per Promise via the kratix.io/circuit-breaker-refill annotation.")
+	flag.DurationVar(&circuitBreakerCooldown, "circuit-breaker-cooldown", 5*time.Minute,
+		"Default cooldown after a circuit breaker opens. "+
+			"Overridable per Promise via the kratix.io/circuit-breaker-cooldown annotation.")
+	flag.BoolVar(&circuitBreakerEnabled, "circuit-breaker-enabled", true,
+		"Global kill switch for per-resource circuit breakers. When false, breakers are constructed but always Allow.")
 	opts := zap.Options{}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
@@ -296,6 +314,13 @@ func main() {
 		ReconciliationInterval: getRegularReconciliationInterval(kratixConfig),
 		EventRecorder:          mgr.GetEventRecorder("PromiseController"),
 		ResourceBindingPinned:  resourceBindingDefaultVersion == ResourceBindingDefaultVersionPinned,
+		BreakerDefaults: controller.BreakerDefaults{
+			Burst:                 circuitBreakerBurst,
+			RefillRate:            circuitBreakerRefillRate,
+			Cooldown:              circuitBreakerCooldown,
+			HalfOpenProbeInterval: 30 * time.Second,
+			Enabled:               circuitBreakerEnabled,
+		},
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Promise")
 		os.Exit(1)
