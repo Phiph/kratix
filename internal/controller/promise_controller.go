@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/syntasso/kratix/internal/circuit"
 	"github.com/syntasso/kratix/lib/objectutil"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
@@ -1160,6 +1161,10 @@ func (r *PromiseReconciler) ensureDynamicControllerIsStarted(promise *v1alpha1.P
 	}
 	logging.Info(logger, "starting dynamic controller")
 
+	breakerParams, warnings := ResolveBreakerParams(promise, r.BreakerDefaults)
+	emitBreakerWarnings(r.Manager.GetEventRecorderFor("PromiseController"), logger, promise, warnings)
+	breaker := circuit.NewTokenBucketBreaker(breakerParams, nil)
+
 	//temporary fix until https://github.com/kubernetes-sigs/controller-runtime/issues/1884 is resolved
 	//once resolved, delete dynamic controller rather than disable
 	dynamicResourceRequestController := &DynamicResourceRequestController{
@@ -1177,16 +1182,18 @@ func (r *PromiseReconciler) ensureDynamicControllerIsStarted(promise *v1alpha1.P
 		ReconciliationInterval:      r.ReconciliationInterval,
 		EventRecorder:               r.Manager.GetEventRecorder("ResourceRequestController"),
 		ResourceBindingPinned:       r.ResourceBindingPinned,
+		Breaker:                     breaker,
 	}
 
 	unstructuredCRD := &unstructured.Unstructured{}
 	unstructuredCRD.SetGroupVersionKind(*rrGVK)
 
+	primaryPredicates := []predicate.Predicate{circuit.Predicate(breaker)}
 	dynamicController, err := ctrl.NewControllerManagedBy(r.Manager).
-		For(unstructuredCRD).
+		For(unstructuredCRD, builder.WithPredicates(primaryPredicates...)).
 		Watches(
 			&batchv1.Job{},
-			handler.EnqueueRequestsFromMapFunc(r.jobEventHandler(promise)),
+			handler.EnqueueRequestsFromMapFunc(circuit.MapFunc(r.jobEventHandler(promise), breaker)),
 			builder.WithPredicates(predicate.NewPredicateFuncs(func(obj client.Object) bool {
 				// Only watch Jobs that are managed by Kratix
 				labels := obj.GetLabels()
@@ -1195,7 +1202,7 @@ func (r *PromiseReconciler) ensureDynamicControllerIsStarted(promise *v1alpha1.P
 		).
 		Watches(
 			&v1alpha1.Work{},
-			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
+			handler.EnqueueRequestsFromMapFunc(circuit.MapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
 				work := obj.(*v1alpha1.Work)
 				rrName, labelExists := work.Labels[v1alpha1.ResourceNameLabel]
 				if !labelExists || work.Labels[v1alpha1.PromiseNameLabel] != promise.GetName() {
@@ -1208,11 +1215,11 @@ func (r *PromiseReconciler) ensureDynamicControllerIsStarted(promise *v1alpha1.P
 						Name:      rrName,
 					},
 				}}
-			}),
+			}, breaker)),
 		).
 		Watches(
 			&v1alpha1.ResourceBinding{},
-			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
+			handler.EnqueueRequestsFromMapFunc(circuit.MapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
 				resourceBinding := obj.(*v1alpha1.ResourceBinding)
 				rrName, labelExists := resourceBinding.Labels[v1alpha1.ResourceNameLabel]
 				if !labelExists || resourceBinding.Labels[v1alpha1.PromiseNameLabel] != promise.GetName() {
@@ -1225,7 +1232,7 @@ func (r *PromiseReconciler) ensureDynamicControllerIsStarted(promise *v1alpha1.P
 						Name:      rrName,
 					},
 				}}
-			})).
+			}, breaker))).
 		Build(dynamicResourceRequestController)
 	if err != nil {
 		return err
