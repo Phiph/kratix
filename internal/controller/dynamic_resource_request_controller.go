@@ -33,6 +33,7 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/syntasso/kratix/api/v1alpha1"
+	"github.com/syntasso/kratix/internal/circuit"
 	"github.com/syntasso/kratix/internal/logging"
 	"github.com/syntasso/kratix/lib/objectutil"
 	"github.com/syntasso/kratix/lib/resourceutil"
@@ -82,12 +83,19 @@ type DynamicResourceRequestController struct {
 	ReconciliationInterval      time.Duration
 	EventRecorder               events.EventRecorder
 	ResourceBindingPinned       bool
+	Breaker                     circuit.Breaker
 }
 
 //+kubebuilder:rbac:groups="batch",resources=jobs,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile reconciles a Dynamically Generated Resource object.
 func (r *DynamicResourceRequestController) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
+	defer func() {
+		if r.Breaker != nil {
+			r.Breaker.Observe(req.NamespacedName, retErr == nil)
+		}
+	}()
+
 	if r.WatchStopped {
 		// WatchStopped means the controller's informer no longer watches the CRD.
 		// This effectively shuts down the controller because it is no longer
