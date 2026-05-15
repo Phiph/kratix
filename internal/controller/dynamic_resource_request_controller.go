@@ -89,6 +89,11 @@ type DynamicResourceRequestController struct {
 	// to decide which kinds of changes are live-updatable (breaker only) vs.
 	// restart-required (rate-limit, MCR).
 	LastRuntimeOptions PromiseRuntimeOptions
+	// RestartRequiredWarned is set once the reuse branch has emitted a
+	// RuntimeOptionsRestartRequired warning event for the current in-memory
+	// controller. Prevents per-reconcile event spam while the user is in the
+	// "annotated but not yet restarted" state. Resets on operator restart.
+	RestartRequiredWarned bool
 }
 
 //+kubebuilder:rbac:groups="batch",resources=jobs,verbs=get;list;watch;create;update;patch;delete
