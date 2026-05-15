@@ -125,6 +125,8 @@ var probeAddr string
 var secureMetrics bool
 var pprofAddr string
 var enableLeaderElection bool
+var dynamicRRQPS float64
+var dynamicRRBurst int
 
 var (
 	circuitBreakerBurst      float64
@@ -160,6 +162,14 @@ func main() {
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
+	flag.Float64Var(&dynamicRRQPS, "dynamic-rr-qps", 0,
+		"Default workqueue QPS budget per dynamic resource-request controller. "+
+			"0 disables the token-bucket overlay (exponential failure limiter only). "+
+			"Overridable per Promise via kratix.io/rate-limit-qps.")
+	flag.IntVar(&dynamicRRBurst, "dynamic-rr-burst", 0,
+		"Default workqueue burst per dynamic RR controller. "+
+			"Ignored when --dynamic-rr-qps=0. Defaults to 10× QPS when unset. "+
+			"Overridable per Promise via kratix.io/rate-limit-burst.")
 	flag.Float64Var(&circuitBreakerBurst, "circuit-breaker-burst", 100,
 		"Default token-bucket burst for per-resource circuit breakers. "+
 			"Overridable per Promise via the kratix.io/circuit-breaker-burst annotation.")
@@ -314,12 +324,16 @@ func main() {
 		ReconciliationInterval: getRegularReconciliationInterval(kratixConfig),
 		EventRecorder:          mgr.GetEventRecorder("PromiseController"),
 		ResourceBindingPinned:  resourceBindingDefaultVersion == ResourceBindingDefaultVersionPinned,
-		BreakerDefaults: controller.BreakerDefaults{
-			Burst:                 circuitBreakerBurst,
-			RefillRate:            circuitBreakerRefillRate,
-			Cooldown:              circuitBreakerCooldown,
-			HalfOpenProbeInterval: 30 * time.Second,
-			Enabled:               circuitBreakerEnabled,
+		PromiseRuntimeDefaults: controller.PromiseRuntimeDefaults{
+			RateLimitQPS:   float32(dynamicRRQPS),
+			RateLimitBurst: dynamicRRBurst,
+			Breaker: controller.BreakerDefaults{
+				Burst:                 circuitBreakerBurst,
+				RefillRate:            circuitBreakerRefillRate,
+				Cooldown:              circuitBreakerCooldown,
+				HalfOpenProbeInterval: 30 * time.Second,
+				Enabled:               circuitBreakerEnabled,
+			},
 		},
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Promise")
