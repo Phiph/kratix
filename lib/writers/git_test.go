@@ -342,7 +342,7 @@ var _ = Describe("GitWriter", func() {
 					{Filepath: escape, Content: "nope"},
 				}
 				sha, err := gitWriter.UpdateFiles("subdir", "wp", workloads, nil)
-				Expect(err).NotTo(HaveOccurred())
+				Expect(err).To(MatchError(writers.ErrPathOutsideRepo))
 				Expect(sha).To(BeEmpty())
 				Expect(fakeRunner.AddCallCount()).To(BeZero())
 				Expect(fakeRunner.CommitAndPushCallCount()).To(BeZero())

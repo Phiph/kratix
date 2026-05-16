@@ -142,7 +142,7 @@ func (g *GitWriter) update(subDir, workPlacementName string, workloadsToCreate [
 				"path of file to write is not located within the git repository",
 				"absolutePath",
 				absoluteFilePath, "tmpDir", localDir)
-			return "", nil //We don't want to retry as this isn't a recoverable error. Log error and return nil.
+			return "", fmt.Errorf("%w: %s", ErrPathOutsideRepo, file.Filepath)
 		}
 
 		if err := os.MkdirAll(filepath.Dir(absoluteFilePath), 0700); err != nil {
