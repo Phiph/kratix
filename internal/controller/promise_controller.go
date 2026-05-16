@@ -39,6 +39,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/syntasso/kratix/api/v1alpha1"
 	"github.com/syntasso/kratix/internal/logging"
+	"github.com/syntasso/kratix/lib/eventemit"
 	"github.com/syntasso/kratix/lib/resourceutil"
 	"github.com/syntasso/kratix/lib/workflow"
 	"go.opentelemetry.io/otel/attribute"
@@ -175,6 +176,11 @@ func (r *PromiseReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 	ctx, logger, traceCtx := setupReconcileTrace(ctx, "promise-controller", spanName, promise, baseLogger)
 	defer finishReconcileTrace(traceCtx, &retErr)()
 
+	// Stamp a per-Reconcile correlation ID; any eventemit.Emit call sharing
+	// this ctx attaches the same kratix.io/ce-correlation-id, so consumers
+	// can reconstruct a reconciliation loop from its emitted events.
+	ctx = eventemit.WithCorrelationID(ctx)
+
 	addPromiseSpanAttributes(traceCtx, promise)
 
 	logging.Info(logger, "reconciliation started")
@@ -188,7 +194,7 @@ func (r *PromiseReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 	if v, ok := promise.Labels[pauseReconciliationLabel]; ok && v == "true" {
 		msg := fmt.Sprintf("'%s' label set to 'true' for promise; pausing reconciliation", pauseReconciliationLabel)
 		logging.Info(r.Log, msg)
-		r.EventRecorder.Event(promise, v1.EventTypeWarning, pausedReconciliationReason, msg)
+		eventemit.Emit(ctx, r.EventRecorder, promise, v1.EventTypeWarning, pausedReconciliationReason, "%s", msg)
 		return ctrl.Result{}, r.setPausedReconciliationStatusConditions(ctx, promise)
 	}
 
@@ -233,8 +239,8 @@ func (r *PromiseReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		// therefore we need to produce an event to inform of this transition
 		if originalStatus == v1alpha1.PromiseStatusAvailable {
 			msg := "Promise no longer available: Requirements have changed"
-			r.EventRecorder.Eventf(
-				promise, "Warning", "Unavailable", msg)
+			eventemit.Emit(ctx, r.EventRecorder, promise,
+				v1.EventTypeWarning, "PromiseUnavailable", "%s", msg)
 			logging.Info(r.Log, msg)
 		}
 
@@ -338,7 +344,7 @@ func (r *PromiseReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 	if !promise.HasPipeline(v1alpha1.WorkflowTypePromise, v1alpha1.WorkflowActionConfigure) ||
 		(completedCond != nil && completedCond.Status == metav1.ConditionTrue) {
 		if completedCond != nil {
-			r.EventRecorder.Eventf(promise, v1.EventTypeNormal, "ConfigureWorkflowCompleted", "All workflows completed")
+			eventemit.Emit(ctx, r.EventRecorder, promise, v1.EventTypeNormal, "PromiseConfigureWorkflowCompleted", "All workflows completed")
 		}
 		return r.nextReconciliation(logger), nil
 	}
@@ -416,7 +422,7 @@ func (r *PromiseReconciler) handlePromiseVersion(ctx context.Context, promise *v
 	}
 
 	if op == controllerutil.OperationResultCreated {
-		r.EventRecorder.Eventf(promise, v1.EventTypeNormal, "RevisionCreated", fmt.Sprintf("Revision %s created", revision.GetName()))
+		eventemit.Emit(ctx, r.EventRecorder, promise, v1.EventTypeNormal, "PromiseRevisionCreated", "Revision %s created", revision.GetName())
 	}
 	return ctrl.Result{}, nil
 }
@@ -487,8 +493,8 @@ func (r *PromiseReconciler) generateConditions(ctx context.Context, promise *v1a
 	if err != nil {
 		return false, err
 	}
-	worksSucceededUpdate := r.updateWorksSucceededCondition(promise, failed, pending, ready, misplaced)
-	reconciledUpdate := r.updateReconciledCondition(promise)
+	worksSucceededUpdate := r.updateWorksSucceededCondition(ctx, promise, failed, pending, ready, misplaced)
+	reconciledUpdate := r.updateReconciledCondition(ctx, promise)
 	workflowsCounterStatusUpdate := r.generateWorkflowsCounterStatus(promise, numberOfPipelines)
 
 	return worksSucceededUpdate || reconciledUpdate || workflowsCounterStatusUpdate, nil
@@ -513,7 +519,7 @@ func (r *PromiseReconciler) generateWorkflowsCounterStatus(promise *v1alpha1.Pro
 	return false
 }
 
-func (r *PromiseReconciler) updateReconciledCondition(promise *v1alpha1.Promise) bool {
+func (r *PromiseReconciler) updateReconciledCondition(ctx context.Context, promise *v1alpha1.Promise) bool {
 	worksSucceeded := promise.GetCondition(string(resourceutil.WorksSucceededCondition))
 	workflowCompleted := promise.GetCondition(string(resourceutil.ConfigureWorkflowCompletedCondition))
 	reconciled := promise.GetCondition(string(resourceutil.ReconciledCondition))
@@ -547,7 +553,7 @@ func (r *PromiseReconciler) updateReconciledCondition(promise *v1alpha1.Promise)
 		if reconciled == nil || reconciled.Status != "True" {
 			updateConditionOnPromise(promise, promiseReconciledCondition())
 			updated = true
-			r.EventRecorder.Event(promise, v1.EventTypeNormal, "ReconcileSucceeded",
+			eventemit.Emit(ctx, r.EventRecorder, promise, v1.EventTypeNormal, "PromiseReconcileSucceeded",
 				"Successfully reconciled")
 		}
 	}
@@ -606,6 +612,7 @@ func (r *PromiseReconciler) getWorksStatus(ctx context.Context,
 }
 
 func (r *PromiseReconciler) updateWorksSucceededCondition(
+	ctx context.Context,
 	promise *v1alpha1.Promise,
 	failed,
 	pending,
@@ -616,7 +623,7 @@ func (r *PromiseReconciler) updateWorksSucceededCondition(
 	if len(failed) > 0 {
 		if cond == nil || cond.Status == "True" {
 			updateConditionOnPromise(promise, promiseWorksSucceededFailedCondition(failed))
-			r.EventRecorder.Eventf(promise, v1.EventTypeWarning, "WorksFailing",
+			eventemit.Emit(ctx, r.EventRecorder, promise, v1.EventTypeWarning, "PromiseWorksFailing",
 				"Some works associated with this promise has failed: [%s]", strings.Join(failed, ","))
 			return true
 		}
@@ -632,7 +639,7 @@ func (r *PromiseReconciler) updateWorksSucceededCondition(
 	if len(misplaced) > 0 {
 		if cond == nil || cond.Status != "False" || cond.Reason != "WorksMisplaced" {
 			updateConditionOnPromise(promise, promiseWorksSucceededMisplacedCondition(misplaced))
-			r.EventRecorder.Eventf(promise, v1.EventTypeWarning, "WorksMisplaced",
+			eventemit.Emit(ctx, r.EventRecorder, promise, v1.EventTypeWarning, "PromiseWorksMisplaced",
 				"Some works associated with this promise are misplaced: [%s]", strings.Join(misplaced, ","))
 			return true
 		}
@@ -640,7 +647,7 @@ func (r *PromiseReconciler) updateWorksSucceededCondition(
 	}
 	if cond == nil || cond.Status != "True" {
 		updateConditionOnPromise(promise, promiseWorksSucceededStatusCondition())
-		r.EventRecorder.Event(promise, v1.EventTypeNormal, "WorksSucceeded",
+		eventemit.Emit(ctx, r.EventRecorder, promise, v1.EventTypeNormal, "PromiseWorksSucceeded",
 			"All works associated with this promise are ready")
 		return true
 	}
@@ -654,7 +661,7 @@ func (r *PromiseReconciler) reconcileResources(ctx context.Context, logger logr.
 		return ctrl.Result{}, err
 	}
 
-	r.EventRecorder.Event(promise, "Normal", "ReconcilingResources", "Reconciling all resource requests")
+	eventemit.Emit(ctx, r.EventRecorder, promise, v1.EventTypeNormal, "PromiseReconcilingResources", "Reconciling all resource requests")
 
 	if _, ok := promise.Labels[resourceutil.ReconcileResourcesLabel]; ok {
 		return ctrl.Result{}, r.removeReconcileResourcesLabel(ctx, promise)
@@ -870,8 +877,8 @@ func (r *PromiseReconciler) generateStatusAndMarkRequirements(ctx context.Contex
 	}
 
 	if condition.Status == metav1.ConditionTrue && len(promise.Spec.RequiredPromises) > 0 {
-		r.EventRecorder.Eventf(promise, v1.EventTypeNormal,
-			"RequirementsFulfilled", "All required promises are available")
+		eventemit.Emit(ctx, r.EventRecorder, promise, v1.EventTypeNormal,
+			"PromiseRequirementsFulfilled", "All required promises are available")
 	}
 
 	return condition, requirements
@@ -887,7 +894,7 @@ func (r *PromiseReconciler) setPromiseStatusToAvailable(ctx context.Context, pro
 	logging.Info(logger, "promise status set to Available")
 	updateConditionOnPromise(promise, promiseAvailableStatusCondition(timestamp))
 
-	r.EventRecorder.Eventf(promise, "Normal", "Available", "Promise is available")
+	eventemit.Emit(ctx, r.EventRecorder, promise, v1.EventTypeNormal, "PromiseAvailable", "Promise is available")
 	return r.updatePromiseStatus(ctx, promise)
 }
 
@@ -900,21 +907,21 @@ func (r *PromiseReconciler) evaluateRequirement(ctx context.Context, promise *v1
 	case apierrors.IsNotFound(err):
 		state = requirementStateNotInstalled
 		updateConditionNotFulfilled(condition, "RequirementsNotInstalled", "Requirements not fulfilled")
-		r.EventRecorder.Eventf(promise, v1.EventTypeNormal,
-			"RequirementsNotInstalled", fmt.Sprintf("Required Promise %s not installed or unknown state", req.Name))
+		eventemit.Emit(ctx, r.EventRecorder, promise, v1.EventTypeNormal,
+			"PromiseRequirementsNotInstalled", "Required Promise %s not installed or unknown state", req.Name)
 
 	case err != nil:
 		state = requirementUnknownInstallationState
 		updateConditionNotFulfilled(condition, "RequirementsNotInstalled", "Unable to determine if requirements are fulfilled")
-		r.EventRecorder.Eventf(promise, v1.EventTypeNormal,
-			"RequirementsNotInstalled", fmt.Sprintf("Required Promise %s not installed or unknown state", required.Name))
+		eventemit.Emit(ctx, r.EventRecorder, promise, v1.EventTypeNormal,
+			"PromiseRequirementsNotInstalled", "Required Promise %s not installed or unknown state", required.Name)
 
 	default:
 		if required.Status.Version != req.Version || required.Status.Status != v1alpha1.PromiseStatusAvailable {
 			condition.Reason, state = generateRequirementState(required.Status.Version, req.Version, required.Status.Status)
 			updateConditionNotFulfilled(condition, condition.Reason, "Requirements not fulfilled")
-			r.EventRecorder.Eventf(promise, v1.EventTypeNormal,
-				condition.Reason, fmt.Sprintf("Waiting for required Promise %s: %s ", required.Name, state))
+			eventemit.Emit(ctx, r.EventRecorder, promise, v1.EventTypeNormal,
+				"Promise"+condition.Reason, "Waiting for required Promise %s: %s ", required.Name, state)
 		} else {
 			state = requirementStateInstalled
 		}
@@ -1058,7 +1065,7 @@ func (r *PromiseReconciler) reconcileSuspendedWorkflow(
 
 	msg := fmt.Sprintf("'%s' label set to 'true' for promise; skipping reconciliation", v1alpha1.WorkflowSuspendedLabel)
 	logging.Info(r.Log, msg)
-	r.EventRecorder.Event(promise, v1.EventTypeWarning, workflowSuspendedReason, msg)
+	eventemit.Emit(o.ctx, r.EventRecorder, promise, v1.EventTypeWarning, workflowSuspendedReason, "%s", msg)
 
 	retryAtTime, err := nextRetryAt(*promise)
 	if err != nil {
@@ -1543,7 +1550,7 @@ func (r *PromiseReconciler) deletePromise(o opts, promise *v1alpha1.Promise) (ct
 		requeue, err := reconcileDelete(jobOpts)
 		if err != nil {
 			if stderrors.Is(err, workflow.ErrDeletePipelineFailed) {
-				r.EventRecorder.Event(promise, "Warning", "Failed Pipeline", "The Delete Pipeline has failed")
+				eventemit.Emit(o.ctx, r.EventRecorder, promise, v1.EventTypeWarning, "PromiseDeletePipelineFailed", "The Delete Pipeline has failed")
 				condition := metav1.Condition{
 					Type:               string(resourceutil.DeleteWorkflowCompletedCondition),
 					Status:             metav1.ConditionFalse,

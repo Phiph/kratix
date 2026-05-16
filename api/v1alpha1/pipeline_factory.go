@@ -474,6 +474,17 @@ func (p *PipelineFactory) getObjAndHash() (*unstructured.Unstructured, string, e
 	return p.ResourceRequest, hash.ComputeHash(fmt.Sprintf("%s-%s", promiseHash, resourceHash)), nil
 }
 
+// kratixEventEmissionRule grants the minimum permissions required for the
+// kratix-emit CLI to publish Kratix CloudEvents from inside a pipeline
+// container. Scoped per-namespace via Role; never granted via ClusterRole.
+func kratixEventEmissionRule() rbacv1.PolicyRule {
+	return rbacv1.PolicyRule{
+		APIGroups: []string{""},
+		Resources: []string{"events"},
+		Verbs:     []string{"create", "patch"},
+	}
+}
+
 func (p *PipelineFactory) role() ([]rbacv1.Role, error) {
 	var roles []rbacv1.Role
 	if p.ResourceWorkflow {
@@ -491,11 +502,18 @@ func (p *PipelineFactory) role() ([]rbacv1.Role, error) {
 				APIVersion: rbacv1.SchemeGroupVersion.String(),
 				Kind:       "Role",
 			},
-			Rules: append(rules, rbacv1.PolicyRule{
-				APIGroups: []string{GroupVersion.Group},
-				Resources: []string{"works"},
-				Verbs:     []string{"*"},
-			}),
+			// Inlined into the existing Role to avoid per-pipeline object
+			// growth at fleet scale. See WIRE-FORMAT.md §12 for the
+			// trade-off (Events are namespace-scoped here; provenance
+			// verification deferred to the forwarder in v0.2).
+			Rules: append(rules,
+				rbacv1.PolicyRule{
+					APIGroups: []string{GroupVersion.Group},
+					Resources: []string{"works"},
+					Verbs:     []string{"*"},
+				},
+				kratixEventEmissionRule(),
+			),
 		})
 	}
 
@@ -607,6 +625,12 @@ func (p *PipelineFactory) clusterRole() ([]rbacv1.ClusterRole, error) {
 					Resources: []string{PromisePlural, PromisePlural + "/status", "works"},
 					Verbs:     []string{"get", "list", "update", "create", "patch"},
 				},
+				// Pipeline pods may emit Kratix CloudEvents via kratix-emit.
+				// Inlined into the existing per-pipeline ClusterRole to keep
+				// the per-pipeline RBAC object count flat at fleet scale.
+				// Trade-off: Event creation is implicitly cluster-wide here;
+				// the forwarder will verify provenance in v0.2.
+				kratixEventEmissionRule(),
 			},
 		})
 	}

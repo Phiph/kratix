@@ -336,6 +336,8 @@ GOLANGCI_LINT ?= $(LOCALBIN)/golangci-lint
 KUSTOMIZE_VERSION ?= v5.6.0
 CONTROLLER_TOOLS_VERSION ?= v0.16.5
 GOLANGCI_LINT_VERSION ?= v2.11.3
+ENVTEST_VERSION ?= release-0.18
+ENVTEST_K8S_VERSION ?= 1.30.0
 
 .PHONY: controller-gen
 controller-gen: $(CONTROLLER_GEN) ## Download controller-gen locally if necessary.
@@ -352,6 +354,16 @@ $(KUSTOMIZE): $(LOCALBIN)
 golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.
 $(GOLANGCI_LINT): $(LOCALBIN)
 	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/v2/cmd/golangci-lint,$(GOLANGCI_LINT_VERSION))
+
+.PHONY: envtest
+envtest: $(ENVTEST) ## Download setup-envtest locally if necessary.
+$(ENVTEST): $(LOCALBIN)
+	$(call go-install-tool,$(ENVTEST),sigs.k8s.io/controller-runtime/tools/setup-envtest,$(ENVTEST_VERSION))
+
+.PHONY: test-envtest
+test-envtest: envtest ## Run envtest-tagged integration tests against a real apiserver+etcd.
+	KUBEBUILDER_ASSETS="$$($(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" \
+		go test -tags=envtest ./eventing/... -count=1 -v
 
 
 # go-install-tool will 'go install' any package with custom target and name of binary, if it doesn't exist

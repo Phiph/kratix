@@ -1,0 +1,191 @@
+# PromiseBundle for the ScheduledJob Promise.
+#
+# This is the producer's manifest of "everything that ships with my Promise."
+# Operators apply this *alongside* promise.yaml (e.g. with `kubectl apply -k`
+# at the directory level). The bundle-controller watches PromiseBundle
+# resources; once the referenced Promise is Available, it server-side-
+# applies every companion with the bundle as owner. Deleting the bundle
+# cascades to its companions via standard garbage collection.
+#
+# Three companions ship with this Promise:
+#   1. PromiseSignals     — the event taxonomy declaration
+#   2. HealthSummaryAgent — the read-only observability agent (config only)
+#   3. job-watcher        — the producer of kratix.scheduledjob.* CEs
+#                           (Deployment + ServiceAccount + RBAC, inlined)
+#
+# The action-taking agent (pause-flaking-job) is intentionally *not* in
+# this bundle. It introduces a different blast radius (it mutates user
+# resources via the gate) and should be a separately-opt-in install for
+# operators who want it. The bundle ships the substrate; remediation is
+# an explicit decision.
+apiVersion: eventing.kratix.io/v1alpha1
+kind: PromiseBundle
+metadata:
+  name: scheduled-job
+spec:
+  promiseRef:
+    name: scheduled-job
+  companions:
+    # 1. The event taxonomy. The bundle-controller doesn't act on it in
+    #    v0.1 (no signal-registry yet), but applying it makes the
+    #    contract queryable: `kubectl get promisesignals scheduled-job`.
+    - name: signals
+      inline:
+        apiVersion: eventing.kratix.io/v1alpha1
+        kind: PromiseSignals
+        metadata:
+          name: scheduled-job
+        spec:
+          promiseRef:
+            name: scheduled-job
+          owner: kratix-platform-reference
+          events:
+            - type: kratix.scheduledjob.job.started
+              severity: info
+              stability: alpha
+              sinceVersion: v0.1
+              description: A scheduled execution started.
+            - type: kratix.scheduledjob.job.completed
+              severity: info
+              stability: alpha
+              sinceVersion: v0.1
+              description: A scheduled execution completed successfully.
+            - type: kratix.scheduledjob.job.failed
+              severity: warning
+              stability: alpha
+              sinceVersion: v0.1
+              description: A scheduled execution failed past its retry budget.
+            - type: kratix.scheduledjob.job.skipped
+              severity: info
+              stability: alpha
+              sinceVersion: v0.1
+              description: A scheduled execution was skipped because the CronJob is suspended.
+
+    # 2. Read-only observability. A configuration of the generic
+    #    HealthSummaryAgent — no Promise-specific runtime needed.
+    - name: health-summary-agent
+      inline:
+        apiVersion: agents.kratix.io/v1alpha1
+        kind: HealthSummaryAgent
+        metadata:
+          name: scheduled-job-health
+          namespace: kratix-platform-system
+          labels:
+            platform.kratix.io/owned-by: scheduled-job-promise
+        spec:
+          digestSchedule: "@hourly"
+          subscribe:
+            - "kratix.scheduledjob.*"
+            - "agent.scheduledjob.*"
+
+    # 3. The signal producer: a Deployment that observes Jobs/CronJobs
+    #    and writes annotated K8s Events the forwarder consumes. This is
+    #    the artefact most producers will forget on their first attempt.
+    - name: job-watcher-sa
+      inline:
+        apiVersion: v1
+        kind: ServiceAccount
+        metadata:
+          name: scheduled-job-watcher
+          namespace: kratix-platform-system
+
+    - name: job-watcher-rbac-cluster
+      inline:
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: ClusterRole
+        metadata:
+          name: scheduled-job-watcher
+        rules:
+          # Watch Jobs and CronJobs cluster-wide so we can observe
+          # ScheduledJob-owned workloads in any namespace.
+          - apiGroups: ["batch"]
+            resources: ["jobs", "cronjobs"]
+            verbs: ["get", "list", "watch"]
+
+    - name: job-watcher-rbac-binding
+      inline:
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: ClusterRoleBinding
+        metadata:
+          name: scheduled-job-watcher
+        roleRef:
+          apiGroup: rbac.authorization.k8s.io
+          kind: ClusterRole
+          name: scheduled-job-watcher
+        subjects:
+          - kind: ServiceAccount
+            name: scheduled-job-watcher
+            namespace: kratix-platform-system
+
+    - name: job-watcher-events-role
+      inline:
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: ClusterRole
+        metadata:
+          name: scheduled-job-watcher-events
+        rules:
+          # The watcher writes annotated K8s Events the forwarder picks
+          # up. Scope is intentionally cluster-wide because Jobs live in
+          # many namespaces; the watcher needs to write Events in each.
+          - apiGroups: [""]
+            resources: ["events"]
+            verbs: ["create", "patch"]
+
+    - name: job-watcher-events-binding
+      inline:
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: ClusterRoleBinding
+        metadata:
+          name: scheduled-job-watcher-events
+        roleRef:
+          apiGroup: rbac.authorization.k8s.io
+          kind: ClusterRole
+          name: scheduled-job-watcher-events
+        subjects:
+          - kind: ServiceAccount
+            name: scheduled-job-watcher
+            namespace: kratix-platform-system
+
+    - name: job-watcher-deployment
+      inline:
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: scheduled-job-watcher
+          namespace: kratix-platform-system
+          labels:
+            app.kubernetes.io/name: scheduled-job-watcher
+            app.kubernetes.io/component: signal-producer
+            platform.kratix.io/owned-by: scheduled-job-promise
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app.kubernetes.io/name: scheduled-job-watcher
+          template:
+            metadata:
+              labels:
+                app.kubernetes.io/name: scheduled-job-watcher
+            spec:
+              serviceAccountName: scheduled-job-watcher
+              securityContext:
+                runAsNonRoot: true
+                seccompProfile:
+                  type: RuntimeDefault
+              containers:
+                - name: watcher
+                  image: ghcr.io/syntasso/reference-scheduled-job-watcher:v0.1
+                  args:
+                    - --resync=5m
+                  securityContext:
+                    allowPrivilegeEscalation: false
+                    readOnlyRootFilesystem: true
+                    capabilities:
+                      drop: ["ALL"]
+                  resources:
+                    requests:
+                      cpu: 25m
+                      memory: 64Mi
+                    limits:
+                      cpu: 200m
+                      memory: 256Mi

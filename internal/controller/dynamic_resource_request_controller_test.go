@@ -102,6 +102,11 @@ var _ = Describe("DynamicResourceRequestController", func() {
 						APIGroups: []string{"platform.kratix.io"},
 						Resources: []string{"works"},
 					},
+					rbacv1.PolicyRule{
+						APIGroups: []string{""},
+						Resources: []string{"events"},
+						Verbs:     []string{"create", "patch"},
+					},
 				))
 				Expect(role.GetLabels()).To(Equal(resourceLabels))
 			})
@@ -208,10 +213,10 @@ var _ = Describe("DynamicResourceRequestController", func() {
 
 			By("publishing events", func() {
 				Expect(eventRecorder.Events).To(Receive(ContainSubstring(
-					"Normal WorksSucceeded All works associated with this resource are ready",
+					"Normal ResourceWorksSucceeded All works associated with this resource are ready",
 				)))
 				Expect(eventRecorder.Events).To(Receive(ContainSubstring(
-					"Normal ReconcileSucceeded Successfully reconciled",
+					"Normal ResourceReconcileSucceeded Successfully reconciled",
 				)))
 			})
 		})
@@ -341,10 +346,10 @@ var _ = Describe("DynamicResourceRequestController", func() {
 
 			It("records an event on the resource request", func() {
 				Expect(eventRecorder.Events).To(Receive(ContainSubstring(
-					"Normal WorksSucceeded All works associated with this resource are ready",
+					"Normal ResourceWorksSucceeded All works associated with this resource are ready",
 				)))
 				Expect(eventRecorder.Events).To(Receive(ContainSubstring(
-					"Warning Failed Pipeline The Delete Pipeline has failed",
+					"Warning ResourceDeletePipelineFailed The Delete Pipeline has failed",
 				)))
 			})
 		})
@@ -605,7 +610,7 @@ var _ = Describe("DynamicResourceRequestController", func() {
 					Expect(condition.Message).To(ContainSubstring("Some works associated with this resource failed: [test]"))
 
 					Expect(eventRecorder.Events).To(Receive(ContainSubstring(
-						"Warning WorksFailing Some works associated with this resource failed: [test]",
+						"Warning ResourceWorksFailing Some works associated with this resource failed: [test]",
 					)))
 				})
 
@@ -638,7 +643,7 @@ var _ = Describe("DynamicResourceRequestController", func() {
 					Expect(condition.Message).To(ContainSubstring("Some works associated with this resource are misplaced: [test]"))
 
 					Expect(eventRecorder.Events).To(Receive(ContainSubstring(
-						"Warning WorksMisplaced Some works associated with this resource are misplaced: [test]",
+						"Warning ResourceWorksMisplaced Some works associated with this resource are misplaced: [test]",
 					)))
 				})
 
@@ -1248,10 +1253,10 @@ var _ = Describe("DynamicResourceRequestController", func() {
 						events := aggregateEvents(eventRecorder.Events)
 						Expect(events).To(SatisfyAll(
 							ContainSubstring(
-								"Normal ReconcileStarted reconciling resource request with promise revision redis-v1.1.0",
+								"Normal ResourceReconcileStarted reconciling resource request with promise revision redis-v1.1.0",
 							),
 							ContainSubstring(
-								"Normal BindingCreated Binding example-redis-e7f90 created for promise redis version latest",
+								"Normal ResourceBindingCreated Binding example-redis-e7f90 created for promise redis version latest",
 							),
 							ContainSubstring(
 								"Normal ResourceBindingVersionUpdated Resource binding version updated to latest",
@@ -1412,7 +1417,7 @@ var _ = Describe("DynamicResourceRequestController", func() {
 
 					By("publishing reconciliation events with the new promise revision", func() {
 						eventMsgs := aggregateEvents(eventRecorder.Events)
-						eventMsg := "Normal ReconcileSucceeded Resource request reconciled with promise redis version v1.2.0"
+						eventMsg := "Normal ResourceReconcileSucceeded Resource request reconciled with promise redis version v1.2.0"
 						Expect(eventMsgs).To(ContainSubstring(eventMsg))
 					})
 				})
@@ -1462,7 +1467,7 @@ var _ = Describe("DynamicResourceRequestController", func() {
 
 					By("publishing reconciliation events with the new promise revision", func() {
 						eventMsgs := aggregateEvents(eventRecorder.Events)
-						eventMsg := "Normal ReconcileSucceeded Resource request reconciled with promise redis version v1.2.0"
+						eventMsg := "Normal ResourceReconcileSucceeded Resource request reconciled with promise redis version v1.2.0"
 						Expect(eventMsgs).To(ContainSubstring(eventMsg))
 					})
 				})

@@ -1,0 +1,20 @@
+apiVersion: agents.kratix.io/v1alpha1
+kind: HealthSummaryAgent
+metadata:
+  name: primary
+  namespace: observability
+spec:
+  # Cadence for digest emission. v0.1 supports:
+  #   @hourly, @daily, @every <go-duration>
+  digestSchedule: "@hourly"
+
+  # Which CloudEvent types to observe. The pipeline materialises this into
+  # a CloudEventSink whose typeFilter routes matching events to the agent's
+  # /events endpoint.
+  subscribe:
+    - "kratix.promise.*"
+    - "kratix.work.*"
+    - "kratix.pipeline.*"
+
+  # Optional image override. Defaults to the Promise's published image.
+  # image: ghcr.io/syntasso/health-summary-agent:v0.1

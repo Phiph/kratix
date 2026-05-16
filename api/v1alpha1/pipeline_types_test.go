@@ -1594,11 +1594,18 @@ var _ = Describe("Pipeline", func() {
 								HaveLen(1),
 							),
 						}),
-						"Rules": ConsistOf(rbacv1.PolicyRule{
-							Verbs:     []string{"get", "list", "update", "create", "patch"},
-							APIGroups: []string{v1alpha1.GroupVersion.Group},
-							Resources: []string{v1alpha1.PromisePlural, v1alpha1.PromisePlural + "/status", "works"},
-						}),
+						"Rules": ConsistOf(
+							rbacv1.PolicyRule{
+								Verbs:     []string{"get", "list", "update", "create", "patch"},
+								APIGroups: []string{v1alpha1.GroupVersion.Group},
+								Resources: []string{v1alpha1.PromisePlural, v1alpha1.PromisePlural + "/status", "works"},
+							},
+							rbacv1.PolicyRule{
+								APIGroups: []string{""},
+								Resources: []string{"events"},
+								Verbs:     []string{"create", "patch"},
+							},
+						),
 					}),
 					MatchFields(IgnoreExtras, Fields{
 						"ObjectMeta": MatchFields(IgnoreExtras, Fields{
@@ -1980,11 +1987,18 @@ func matchClusterRolesAndBindings(clusterRoles []rbacv1.ClusterRole, clusterRole
 	ExpectWithOffset(1, clusterRoles).To(HaveLen(1))
 	ExpectWithOffset(1, clusterRoles[0].GetName()).To(Equal(factory.ID))
 	ExpectWithOffset(1, clusterRoles[0].GetLabels()).To(HaveKeyWithValue(v1alpha1.PromiseNameLabel, factory.Promise.GetName()))
-	ExpectWithOffset(1, clusterRoles[0].Rules).To(ConsistOf(rbacv1.PolicyRule{
-		APIGroups: []string{v1alpha1.GroupVersion.Group},
-		Resources: []string{v1alpha1.PromisePlural, v1alpha1.PromisePlural + "/status", "works"},
-		Verbs:     []string{"get", "list", "update", "create", "patch"},
-	}))
+	ExpectWithOffset(1, clusterRoles[0].Rules).To(ConsistOf(
+		rbacv1.PolicyRule{
+			APIGroups: []string{v1alpha1.GroupVersion.Group},
+			Resources: []string{v1alpha1.PromisePlural, v1alpha1.PromisePlural + "/status", "works"},
+			Verbs:     []string{"get", "list", "update", "create", "patch"},
+		},
+		rbacv1.PolicyRule{
+			APIGroups: []string{""},
+			Resources: []string{"events"},
+			Verbs:     []string{"create", "patch"},
+		},
+	))
 
 	ExpectWithOffset(1, clusterRoleBindings).To(HaveLen(1))
 	ExpectWithOffset(1, clusterRoleBindings[0].GetName()).To(Equal(factory.ID))
@@ -2007,15 +2021,23 @@ func matchResourceRolesAndBindings(roles []rbacv1.Role, bindings []rbacv1.RoleBi
 	Expect(roles[0].GetName()).To(Equal(factory.ID))
 	Expect(roles[0].GetNamespace()).To(Equal(factory.Namespace))
 	Expect(roles[0].GetLabels()).To(HaveKeyWithValue(v1alpha1.PromiseNameLabel, factory.Promise.GetName()))
-	Expect(roles[0].Rules).To(ConsistOf(rbacv1.PolicyRule{
-		APIGroups: []string{promiseCrd.Spec.Group},
-		Resources: []string{promiseCrd.Spec.Names.Plural, promiseCrd.Spec.Names.Plural + "/status"},
-		Verbs:     []string{"get", "list", "update", "create", "patch"},
-	}, rbacv1.PolicyRule{
-		APIGroups: []string{v1alpha1.GroupVersion.Group},
-		Resources: []string{"works"},
-		Verbs:     []string{"*"},
-	}))
+	Expect(roles[0].Rules).To(ConsistOf(
+		rbacv1.PolicyRule{
+			APIGroups: []string{promiseCrd.Spec.Group},
+			Resources: []string{promiseCrd.Spec.Names.Plural, promiseCrd.Spec.Names.Plural + "/status"},
+			Verbs:     []string{"get", "list", "update", "create", "patch"},
+		},
+		rbacv1.PolicyRule{
+			APIGroups: []string{v1alpha1.GroupVersion.Group},
+			Resources: []string{"works"},
+			Verbs:     []string{"*"},
+		},
+		rbacv1.PolicyRule{
+			APIGroups: []string{""},
+			Resources: []string{"events"},
+			Verbs:     []string{"create", "patch"},
+		},
+	))
 
 	Expect(bindings).To(HaveLen(1))
 	Expect(bindings[0].GetName()).To(Equal(factory.ID))

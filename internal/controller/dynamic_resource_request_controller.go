@@ -33,6 +33,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/syntasso/kratix/api/v1alpha1"
 	"github.com/syntasso/kratix/internal/logging"
+	"github.com/syntasso/kratix/lib/eventemit"
 	"github.com/syntasso/kratix/lib/objectutil"
 	"github.com/syntasso/kratix/lib/resourceutil"
 	"github.com/syntasso/kratix/lib/workflow"
@@ -148,6 +149,10 @@ func (r *DynamicResourceRequestController) Reconcile(ctx context.Context, req ct
 	ctx, logger, traceCtx := setupReconcileTrace(ctx, "dynamic-resource-request-controller", spanName, rr, baseLogger)
 	defer finishReconcileTrace(traceCtx, &retErr)()
 
+	// Stamp a per-Reconcile correlation ID so every eventemit.Emit on this
+	// ctx attaches the same kratix.io/ce-correlation-id.
+	ctx = eventemit.WithCorrelationID(ctx)
+
 	logging.Info(logger, "reconciliation started")
 	defer logReconcileDuration(logger, time.Now(), result, retErr)()
 
@@ -202,8 +207,8 @@ func (r *DynamicResourceRequestController) Reconcile(ctx context.Context, req ct
 		promise.Spec = promiseRevisionUsed.Spec.PromiseSpec
 		logging.Debug(baseLogger,
 			"Found PromiseRevision from ResourceRequest", "revision name", promiseRevisionUsed.Name)
-		r.EventRecorder.Eventf(rr, v1.EventTypeNormal, "ReconcileStarted",
-			fmt.Sprintf("reconciling resource request with promise revision %s", promiseRevisionUsed.Name))
+		eventemit.Emit(ctx, r.EventRecorder, rr, v1.EventTypeNormal, "ResourceReconcileStarted",
+			"reconciling resource request with promise revision %s", promiseRevisionUsed.Name)
 	}
 
 	if !rr.GetDeletionTimestamp().IsZero() {
@@ -488,11 +493,11 @@ func (r *DynamicResourceRequestController) updateResourceBinding(ctx context.Con
 	)
 
 	if op == "created" {
-		r.EventRecorder.Event(rr, v1.EventTypeNormal, "BindingCreated",
-			fmt.Sprintf("Binding %s created for promise %s version %s",
-				resourceBinding.GetName(),
-				promise.GetName(),
-				resourceBinding.Spec.Version))
+		eventemit.Emit(ctx, r.EventRecorder, rr, v1.EventTypeNormal, "ResourceBindingCreated",
+			"Binding %s created for promise %s version %s",
+			resourceBinding.GetName(),
+			promise.GetName(),
+			resourceBinding.Spec.Version)
 	}
 
 	return nil
@@ -575,7 +580,7 @@ func (r *DynamicResourceRequestController) reconcileSuspendedWorkflow(
 
 	msg := fmt.Sprintf("'%s' label set to 'true' for resource request; skipping reconciliation", v1alpha1.WorkflowSuspendedLabel)
 	logging.Info(logger, msg)
-	r.EventRecorder.Event(rr, v1.EventTypeWarning, workflowSuspendedReason, msg)
+	eventemit.Emit(ctx, r.EventRecorder, rr, v1.EventTypeWarning, workflowSuspendedReason, "%s", msg)
 
 	nextRetryAtTime, err := nextRetryAtForResource(rr)
 	if err != nil {
@@ -606,21 +611,21 @@ func (r *DynamicResourceRequestController) generateResourceStatus(ctx context.Co
 	if err != nil {
 		return false, err
 	}
-	worksSucceededUpdate := r.updateWorksSucceededCondition(rr, failed, pending, ready, misplaced)
-	reconciledUpdate := r.updateReconciledCondition(rr)
+	worksSucceededUpdate := r.updateWorksSucceededCondition(ctx, rr, failed, pending, ready, misplaced)
+	reconciledUpdate := r.updateReconciledCondition(ctx, rr)
 	workflowsCounterStatusUpdate := r.generateWorkflowsCounterStatus(logger, rr, numberOfPipelines)
-	promiseVersionUpdate := r.updatePromiseVersionStatus(logger, rr, bindingVersion, promiseRevision)
+	promiseVersionUpdate := r.updatePromiseVersionStatus(ctx, logger, rr, bindingVersion, promiseRevision)
 
 	return worksSucceededUpdate || reconciledUpdate || workflowsCounterStatusUpdate || promiseVersionUpdate, nil
 }
 
-func (r *DynamicResourceRequestController) updateWorksSucceededCondition(rr *unstructured.Unstructured, failed, pending, _, misplaced []string) bool {
+func (r *DynamicResourceRequestController) updateWorksSucceededCondition(ctx context.Context, rr *unstructured.Unstructured, failed, pending, _, misplaced []string) bool {
 	cond := resourceutil.GetCondition(rr, resourceutil.WorksSucceededCondition)
 	if len(failed) > 0 {
 		if cond == nil || cond.Status == v1.ConditionTrue {
 			resourceutil.MarkResourceRequestAsWorksFailed(rr, failed)
-			r.EventRecorder.Event(rr, v1.EventTypeWarning, "WorksFailing",
-				fmt.Sprintf("Some works associated with this resource failed: [%s]", strings.Join(failed, ",")))
+			eventemit.Emit(ctx, r.EventRecorder, rr, v1.EventTypeWarning, "ResourceWorksFailing",
+				"Some works associated with this resource failed: [%s]", strings.Join(failed, ","))
 			return true
 		}
 		return false
@@ -635,22 +640,22 @@ func (r *DynamicResourceRequestController) updateWorksSucceededCondition(rr *uns
 	if len(misplaced) > 0 {
 		if cond == nil || cond.Status != v1.ConditionFalse || cond.Reason != "WorksMisplaced" {
 			resourceutil.MarkResourceRequestAsWorksMisplaced(rr, misplaced)
-			r.EventRecorder.Event(rr, v1.EventTypeWarning, "WorksMisplaced",
-				fmt.Sprintf("Some works associated with this resource are misplaced: [%s]", strings.Join(misplaced, ",")))
+			eventemit.Emit(ctx, r.EventRecorder, rr, v1.EventTypeWarning, "ResourceWorksMisplaced",
+				"Some works associated with this resource are misplaced: [%s]", strings.Join(misplaced, ","))
 			return true
 		}
 		return false
 	}
 	if cond == nil || cond.Status != v1.ConditionTrue {
 		resourceutil.MarkResourceRequestAsWorksSucceeded(rr)
-		r.EventRecorder.Event(rr, v1.EventTypeNormal, "WorksSucceeded",
+		eventemit.Emit(ctx, r.EventRecorder, rr, v1.EventTypeNormal, "ResourceWorksSucceeded",
 			"All works associated with this resource are ready")
 		return true
 	}
 	return false
 }
 
-func (r *DynamicResourceRequestController) updateReconciledCondition(rr *unstructured.Unstructured) bool {
+func (r *DynamicResourceRequestController) updateReconciledCondition(ctx context.Context, rr *unstructured.Unstructured) bool {
 	worksSucceeded := resourceutil.GetCondition(rr, resourceutil.WorksSucceededCondition)
 	workflowCompleted := resourceutil.GetCondition(rr, resourceutil.ConfigureWorkflowCompletedCondition)
 	reconciled := resourceutil.GetCondition(rr, resourceutil.ReconciledCondition)
@@ -683,14 +688,14 @@ func (r *DynamicResourceRequestController) updateReconciledCondition(rr *unstruc
 		if reconciled == nil || reconciled.Status != v1.ConditionTrue {
 			resourceutil.MarkReconciledTrue(rr)
 			updated = true
-			r.EventRecorder.Event(rr, v1.EventTypeNormal, "ReconcileSucceeded",
+			eventemit.Emit(ctx, r.EventRecorder, rr, v1.EventTypeNormal, "ResourceReconcileSucceeded",
 				"Successfully reconciled")
 		}
 	}
 	return updated
 }
 
-func (r *DynamicResourceRequestController) updatePromiseVersionStatus(logger logr.Logger, rr *unstructured.Unstructured, bindingVersion string, promiseRevision *v1alpha1.PromiseRevision) bool {
+func (r *DynamicResourceRequestController) updatePromiseVersionStatus(ctx context.Context, logger logr.Logger, rr *unstructured.Unstructured, bindingVersion string, promiseRevision *v1alpha1.PromiseRevision) bool {
 	logging.Trace(logger, "Checking if we need to update the promise version in the status")
 	if !r.PromiseUpgradeFeatFlag || promiseRevision == nil {
 		logging.Trace(logger, "Feature flag disabled or no PromiseRevision: no update promise version required")
@@ -701,7 +706,7 @@ func (r *DynamicResourceRequestController) updatePromiseVersionStatus(logger log
 	currentVersion := resourceutil.GetStatus(rr, resourcePromiseVersionStatus)
 	if currentVersion != promiseRevision.Spec.Version {
 		resourceutil.SetStatus(rr, logger, resourcePromiseVersionStatus, promiseRevision.Spec.Version)
-		r.EventRecorder.Eventf(rr, v1.EventTypeNormal, "ReconcileSucceeded",
+		eventemit.Emit(ctx, r.EventRecorder, rr, v1.EventTypeNormal, "ResourceReconcileSucceeded",
 			"Resource request reconciled with promise %s version %s",
 			promiseRevision.Spec.PromiseRef.Name,
 			promiseRevision.Spec.Version)
@@ -711,7 +716,7 @@ func (r *DynamicResourceRequestController) updatePromiseVersionStatus(logger log
 	currentBindingVersion := resourceutil.GetStatus(rr, resourceBindingVersionStatus)
 	if currentBindingVersion != bindingVersion {
 		resourceutil.SetStatus(rr, logger, resourceBindingVersionStatus, bindingVersion)
-		r.EventRecorder.Eventf(rr, v1.EventTypeNormal, "ResourceBindingVersionUpdated",
+		eventemit.Emit(ctx, r.EventRecorder, rr, v1.EventTypeNormal, "ResourceBindingVersionUpdated",
 			"Resource binding version updated to %s", bindingVersion)
 		versionUpdated = true
 	}
@@ -723,7 +728,7 @@ func (r *DynamicResourceRequestController) setPausedReconciliationStatusConditio
 	reconciled := resourceutil.GetCondition(rr, resourceutil.ReconciledCondition)
 	if reconciled == nil || reconciled.Status != "Unknown" || reconciled.Message != "Paused" {
 		resourceutil.MarkReconciledPaused(rr)
-		r.EventRecorder.Event(rr, v1.EventTypeWarning, pausedReconciliationReason, eventMsg)
+		eventemit.Emit(ctx, r.EventRecorder, rr, v1.EventTypeWarning, pausedReconciliationReason, "%s", eventMsg)
 		return r.Client.Status().Update(ctx, rr)
 	}
 	return nil
@@ -865,7 +870,7 @@ func (r *DynamicResourceRequestController) deleteResources(o opts, promise *v1al
 		requeue, err := reconcileDelete(jobOpts)
 		if err != nil {
 			if errors.Is(err, workflow.ErrDeletePipelineFailed) {
-				r.EventRecorder.Event(resourceRequest, "Warning", "Failed Pipeline", "The Delete Pipeline has failed")
+				eventemit.Emit(o.ctx, r.EventRecorder, resourceRequest, v1.EventTypeWarning, "ResourceDeletePipelineFailed", "The Delete Pipeline has failed")
 				resourceutil.MarkDeleteWorkflowAsFailed(o.logger, resourceRequest)
 				if err := r.Client.Status().Update(o.ctx, resourceRequest); err != nil {
 					logging.Error(o.logger, err, "failed to update resource request status", "promise", promise.GetName(),
@@ -1175,7 +1180,7 @@ func getPromiseRevisionToUse(ctx context.Context, rr *unstructured.Unstructured,
 	promiseRevisionToUse, err = fetchRevision(ctx, r.Client, promise, resourceBinding, statusPromiseVersion)
 	if err != nil {
 		baseLogger.Error(err, "failed to fetch PromiseRevision for ResourceRequest")
-		r.EventRecorder.Eventf(rr, v1.EventTypeWarning, promiseRevisionLookupFailedReason, err.Error())
+		eventemit.Emit(ctx, r.EventRecorder, rr, v1.EventTypeWarning, promiseRevisionLookupFailedReason, "%s", err.Error())
 		return nil, "", err
 	}
 

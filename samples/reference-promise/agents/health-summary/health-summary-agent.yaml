@@ -1,0 +1,36 @@
+# Read-only agent for the ScheduledJob Promise.
+#
+# This is a *configuration*, not a runtime. We reuse the generic
+# health-summary-agent shipped at eventing/agents/health-summary/. The
+# producer's only contribution is filtering the agent's subscription to
+# this Promise's signal namespace — kratix.scheduledjob.* — so its hourly
+# digest is scoped to ScheduledJob health and doesn't drown in unrelated
+# fleet noise.
+#
+# This is the headline lesson of the Kratix-native agent pattern:
+# most Promises won't author their own agent runtime. They'll ship a
+# tuned configuration of the generic ones and call it done.
+#
+# Apply this AFTER the generic HealthSummaryAgent Promise is installed.
+# See eventing/agents/health-summary/README.md for that.
+apiVersion: agents.kratix.io/v1alpha1
+kind: HealthSummaryAgent
+metadata:
+  name: scheduled-job-health
+  namespace: kratix-platform-system
+  labels:
+    platform.kratix.io/owned-by: scheduled-job-promise
+spec:
+  # Once per hour is a reasonable cadence for digest emission. The
+  # underlying rolling window is always 1h, so this matches the horizon.
+  digestSchedule: "@hourly"
+
+  # The whole point of this manifest: pin the subscription to *this*
+  # Promise's signal namespace. The agent's CloudEventSink, materialised
+  # by the generic Promise's pipeline, will filter accordingly.
+  subscribe:
+    - "kratix.scheduledjob.*"
+    - "agent.scheduledjob.*"   # include gate vocabulary so digests show approval activity
+
+  # Image is left at the Promise default; producers override only if they
+  # need a Promise-specific runtime fork. We don't.

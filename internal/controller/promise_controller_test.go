@@ -350,7 +350,7 @@ var _ = Describe("PromiseController", func() {
 						assertPromiseUnavailableCondition(cond)
 
 						Eventually(eventRecorder.Events).Should(Receive(ContainSubstring(
-							"Normal RequirementsNotInstalled Required Promise kafka not installed or unknown state",
+							"Normal PromiseRequirementsNotInstalled Required Promise kafka not installed or unknown state",
 						)))
 					})
 
@@ -404,7 +404,7 @@ var _ = Describe("PromiseController", func() {
 						assertPromiseUnavailableCondition(cond)
 
 						Eventually(eventRecorder.Events).Should(Receive(ContainSubstring(
-							"Normal RequirementsNotInstalled Waiting for required Promise kafka: Requirement not installed at the specified version",
+							"Normal PromiseRequirementsNotInstalled Waiting for required Promise kafka: Requirement not installed at the specified version",
 						)))
 					})
 				})
@@ -449,7 +449,7 @@ var _ = Describe("PromiseController", func() {
 							assertPromiseUnavailableCondition(cond)
 
 							Eventually(eventRecorder.Events).Should(Receive(ContainSubstring(
-								"Normal RequirementsNotAvailable Waiting for required Promise kafka: Requirement not available",
+								"Normal PromiseRequirementsNotAvailable Waiting for required Promise kafka: Requirement not available",
 							)))
 						})
 					})
@@ -501,10 +501,10 @@ var _ = Describe("PromiseController", func() {
 
 							By("firing an event to indicate the promise is available", func() {
 								Eventually(eventRecorder.Events).Should(Receive(ContainSubstring(
-									"Normal RequirementsFulfilled All required promises are available",
+									"Normal PromiseRequirementsFulfilled All required promises are available",
 								)))
 								Eventually(eventRecorder.Events).Should(Receive(ContainSubstring(
-									"Normal Available Promise is available")))
+									"Normal PromiseAvailable Promise is available")))
 							})
 
 							By("starting the dynamic controller", func() {
@@ -589,7 +589,7 @@ var _ = Describe("PromiseController", func() {
 
 					It("fires an event to indicate the promise is no longer available", func() {
 						Eventually(eventRecorder.Events).Should(Receive(ContainSubstring(
-							"Warning Unavailable Promise no longer available: Requirements have changed")))
+							"Warning PromiseUnavailable Promise no longer available: Requirements have changed")))
 					})
 				})
 			})
@@ -655,6 +655,11 @@ var _ = Describe("PromiseController", func() {
 								APIGroups: []string{"platform.kratix.io"},
 								Resources: []string{"promises", "promises/status", "works"},
 							},
+							rbacv1.PolicyRule{
+								APIGroups: []string{""},
+								Resources: []string{"events"},
+								Verbs:     []string{"create", "patch"},
+							},
 						))
 						Expect(role.GetLabels()).To(Equal(promiseCommonLabels))
 					})
@@ -698,10 +703,10 @@ var _ = Describe("PromiseController", func() {
 						Expect(result).To(Equal(ctrl.Result{RequeueAfter: reconciler.ReconciliationInterval}))
 
 						Eventually(eventRecorder.Events).Should(Receive(ContainSubstring(
-							"Normal Available Promise is available",
+							"Normal PromiseAvailable Promise is available",
 						)))
 						Eventually(eventRecorder.Events).Should(Receive(ContainSubstring(
-							"Normal ConfigureWorkflowCompleted All workflows completed",
+							"Normal PromiseConfigureWorkflowCompleted All workflows completed",
 						)))
 					})
 
@@ -832,7 +837,7 @@ var _ = Describe("PromiseController", func() {
 						Expect(condition.Message).To(ContainSubstring("Some works associated with this promise are not ready: [test-work]"))
 
 						Expect(aggregateEvents(eventRecorder.Events)).To(
-							ContainSubstring("Warning WorksFailing Some works associated with this promise has failed: [test-work]"))
+							ContainSubstring("Warning PromiseWorksFailing Some works associated with this promise has failed: [test-work]"))
 					})
 				})
 
@@ -890,7 +895,7 @@ var _ = Describe("PromiseController", func() {
 						Expect(condition.Message).To(ContainSubstring("Some works associated with this promise are misplaced: [test-work]"))
 
 						Expect(aggregateEvents(eventRecorder.Events)).To(
-							ContainSubstring("Warning WorksMisplaced Some works associated with this promise are misplaced: [test-work]"))
+							ContainSubstring("Warning PromiseWorksMisplaced Some works associated with this promise are misplaced: [test-work]"))
 					})
 				})
 
@@ -911,7 +916,7 @@ var _ = Describe("PromiseController", func() {
 						Expect(condition.Message).To(ContainSubstring("All works associated with this promise are ready"))
 
 						Expect(aggregateEvents(eventRecorder.Events)).To(
-							ContainSubstring("Normal WorksSucceeded All works associated with this promise are ready"))
+							ContainSubstring("Normal PromiseWorksSucceeded All works associated with this promise are ready"))
 					})
 				})
 			})
@@ -936,7 +941,7 @@ var _ = Describe("PromiseController", func() {
 						Expect(condition.Message).To(ContainSubstring("Reconciled"))
 						allEvents := aggregateEvents(eventRecorder.Events)
 						Expect(allEvents).To(ContainSubstring(
-							"Normal WorksSucceeded All works associated with this promise are ready"))
+							"Normal PromiseWorksSucceeded All works associated with this promise are ready"))
 						Expect(allEvents).NotTo(ContainSubstring("All required promises are available"))
 					})
 				})
@@ -1337,12 +1342,12 @@ var _ = Describe("PromiseController", func() {
 							var event string
 							for len(eventRecorder.Events) > 0 {
 								event = <-eventRecorder.Events
-								if strings.Contains(event, "Warning Failed Pipeline The Delete Pipeline has failed") {
+								if strings.Contains(event, "Warning PromiseDeletePipelineFailed The Delete Pipeline has failed") {
 									return event
 								}
 							}
 							return ""
-						}).Should(ContainSubstring("Warning Failed Pipeline The Delete Pipeline has failed"))
+						}).Should(ContainSubstring("Warning PromiseDeletePipelineFailed The Delete Pipeline has failed"))
 					})
 				})
 
@@ -1548,7 +1553,7 @@ var _ = Describe("PromiseController", func() {
 
 				By("firing an event to indicate the promise is available", func() {
 					Eventually(eventRecorder.Events).Should(Receive(ContainSubstring(
-						"Normal Available Promise is available")))
+						"Normal PromiseAvailable Promise is available")))
 				})
 
 				By("setting up the next reconciliation loop", func() {
@@ -1619,7 +1624,7 @@ var _ = Describe("PromiseController", func() {
 
 				By("firing an event to indicate the resources are being reconciled", func() {
 					Eventually(eventRecorder.Events).Should(Receive(ContainSubstring(
-						"Normal ReconcilingResources Reconciling all resource requests")))
+						"Normal PromiseReconcilingResources Reconciling all resource requests")))
 				})
 			})
 		})

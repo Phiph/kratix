@@ -1,0 +1,127 @@
+# PromiseSignals for the ScheduledJob Promise.
+#
+# Declares the CloudEvent types the ScheduledJob ecosystem commits to
+# emitting. Producer-side documentation expressed as a Kubernetes
+# resource so it's versioned, validated, and queryable alongside the
+# Promise itself.
+#
+# Two families of events live here:
+#   1. kratix.scheduledjob.*  — emitted by job-watcher (substrate-level)
+#   2. agent.scheduledjob.*   — emitted by pause-flaking-job (escalation
+#                                gate contract; reserved suffixes per
+#                                docs/escalation-contract.md)
+#
+# A consumer reading this file knows exactly what events to subscribe to
+# and what each one means. No code inspection required.
+apiVersion: eventing.kratix.io/v1alpha1
+kind: PromiseSignals
+metadata:
+  name: scheduled-job
+spec:
+  promiseRef:
+    name: scheduled-job
+  owner: kratix-platform-reference
+  events:
+    # ---- ScheduledJob lifecycle (emitted by job-watcher) ----
+    - type: kratix.scheduledjob.job.started
+      severity: info
+      stability: alpha
+      sinceVersion: v0.1
+      description: |
+        A scheduled execution started. Emitted when the underlying
+        CronJob creates a Job and the Job becomes Active. The
+        `kratix.io/ce-data` annotation carries scheduledJob,
+        cronJobName, and jobName for traceability.
+      payload:
+        scheduledJob: string
+        cronJobName:  string
+        jobName:      string
+
+    - type: kratix.scheduledjob.job.completed
+      severity: info
+      stability: alpha
+      sinceVersion: v0.1
+      description: |
+        A scheduled execution completed successfully (Job succeeded).
+        The pause-flaking-job agent uses this to reset its in-window
+        failure count for the schedule.
+      payload:
+        scheduledJob:   string
+        jobName:        string
+        durationSeconds: number
+
+    - type: kratix.scheduledjob.job.failed
+      severity: warning
+      stability: alpha
+      sinceVersion: v0.1
+      description: |
+        A scheduled execution failed (Job failed past backoffLimit).
+        Consumers like pause-flaking-job count these in a rolling
+        window and may propose remediation.
+      payload:
+        scheduledJob: string
+        jobName:      string
+        retryCount:   number
+
+    - type: kratix.scheduledjob.job.skipped
+      severity: info
+      stability: alpha
+      sinceVersion: v0.1
+      description: |
+        A scheduled execution was skipped because the parent CronJob
+        is currently suspended. Useful to distinguish a paused
+        schedule from a forgotten one.
+      payload:
+        scheduledJob: string
+
+    # ---- Escalation-gate vocabulary for the pause-flaking-job agent ----
+    # These are mandated by the escalation contract (docs/escalation-contract.md).
+    # Reserved suffixes: .proposed, .approved, .executed, .expired.
+
+    - type: agent.scheduledjob.pause.proposed
+      severity: warning
+      stability: alpha
+      sinceVersion: v0.1
+      description: |
+        The pause-flaking-job agent proposes suspending a ScheduledJob
+        that has failed repeatedly within its observation window.
+        Payload carries the proposalId, failing-window evidence, and
+        the kubectl command operators would otherwise run.
+      payload:
+        proposalId:   string
+        scheduledJob: string
+        failures:     number
+        windowMinutes: number
+
+    - type: agent.scheduledjob.pause.approved
+      severity: info
+      stability: alpha
+      sinceVersion: v0.1
+      description: |
+        The escalation gate observed approval for a pause proposal.
+        Emitted by the gate controller, not by the agent itself.
+      payload:
+        proposalId: string
+
+    - type: agent.scheduledjob.pause.executed
+      severity: warning
+      stability: alpha
+      sinceVersion: v0.1
+      description: |
+        The pause-flaking-job agent set spec.suspended=true on the
+        ScheduledJob. Re-enabling requires a manual change to the
+        Resource Request.
+      payload:
+        proposalId:   string
+        scheduledJob: string
+
+    - type: agent.scheduledjob.pause.expired
+      severity: info
+      stability: alpha
+      sinceVersion: v0.1
+      description: |
+        A pause proposal expired without approval. No action was
+        taken. The schedule continues to run; the agent will re-
+        propose if the failure pattern persists.
+      payload:
+        proposalId: string

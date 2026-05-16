@@ -1,0 +1,245 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.16.5
+  name: agentproposals.eventing.kratix.io
+spec:
+  group: eventing.kratix.io
+  names:
+    kind: AgentProposal
+    listKind: AgentProposalList
+    plural: agentproposals
+    shortNames:
+    - aprop
+    singular: agentproposal
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.action
+      name: Action
+      type: string
+    - jsonPath: .spec.actor
+      name: Actor
+      type: string
+    - jsonPath: .spec.subject
+      name: Subject
+      type: string
+    - jsonPath: .spec.expiresAt
+      name: ExpiresAt
+      type: date
+    - jsonPath: .status.resolution
+      name: Resolution
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          AgentProposal is the audit object for an agent's proposed action.
+          It is created by the escalation gate controller when an .proposed
+          CloudEvent is received, and resolved when either approved (via the
+          agents.kratix.io/approved-by annotation) or expired.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              AgentProposalSpec is the immutable description of a proposed action.
+              It is set once when the gate controller materialises a .proposed event
+              and never modified afterwards — the spec is the audit object.
+            properties:
+              action:
+                description: |-
+                  Action is a short verb describing what is proposed (e.g. "failover",
+                  "reset-pause-label"). Human-readable; used by UIs and runbooks.
+                type: string
+              actor:
+                description: |-
+                  Actor identifies the agent that proposed the action.
+                  Format is free-form but conventionally
+                  "agent/<name>/<version>" (e.g. "agent/redis-flake-detector/v1.2.0").
+                type: string
+              correlationId:
+                description: |-
+                  CorrelationID is the CloudEvent correlation ID of the originating
+                  .proposed event. Useful for tracing back to the reconcile loops the
+                  agent observed.
+                type: string
+              evidence:
+                description: |-
+                  Evidence carries the trail behind the rationale. v0.1 keeps this
+                  open-ended (raw JSON bytes); future revisions may tighten it.
+                properties:
+                  correlationIds:
+                    description: |-
+                      CorrelationIDs links to other CloudEvent correlation IDs the agent
+                      observed when forming this proposal.
+                    items:
+                      type: string
+                    type: array
+                  notes:
+                    description: |-
+                      Notes is a free-form scratchpad for additional context. JSON-encoded
+                      to allow agents to attach structured data without expanding the API.
+                    type: string
+                  since:
+                    description: |-
+                      Since is the timestamp the agent began observing the pattern that
+                      led to this proposal.
+                    format: date-time
+                    type: string
+                type: object
+              expiresAt:
+                description: |-
+                  ExpiresAt is the deadline after which an approval is no longer
+                  honoured. The gate controller emits .expired and resolves the
+                  proposal automatically when this time passes.
+                format: date-time
+                type: string
+              plan:
+                description: |-
+                  Plan is the agent-specific blob describing how the action will be
+                  executed. Opaque to Kratix; consumed only by the proposing agent.
+                  Carried as raw JSON to keep the API surface narrow.
+                properties:
+                  body:
+                    description: Body is a JSON-encoded blob. The shape is agent-specific.
+                    type: string
+                type: object
+              proposedEventType:
+                description: |-
+                  ProposedEventType is the CloudEvent type that originated this
+                  proposal (e.g. agent.redis.failover.proposed).
+                type: string
+              rationale:
+                description: |-
+                  Rationale is the agent's explanation of why this action is being
+                  proposed. Approvers read this before annotating.
+                minLength: 1
+                type: string
+              subject:
+                description: |-
+                  Subject is the CloudEvent subject of the proposal: the object the
+                  proposed action would affect (e.g. "default/promise/redis-primary").
+                type: string
+            required:
+            - action
+            - actor
+            - expiresAt
+            - proposedEventType
+            - rationale
+            - subject
+            type: object
+          status:
+            description: AgentProposalStatus reports the observed state of a proposal.
+            properties:
+              approvedAt:
+                description: ApprovedAt is the timestamp at which approval was observed.
+                format: date-time
+                type: string
+              approvedBy:
+                description: |-
+                  ApprovedBy is the value of the agents.kratix.io/approved-by
+                  annotation at the moment the gate controller observed approval.
+                  Immutable once set — the first observation wins.
+                type: string
+              conditions:
+                description: |-
+                  Conditions reports observed state. Standard:
+                    Ready  — proposal is alive and awaiting approval.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              resolution:
+                description: |-
+                  Resolution is set once the proposal reaches a terminal state.
+                  Empty while the proposal is still awaiting approval.
+                enum:
+                - approved
+                - expired
+                - executed
+                type: string
+              resolvedAt:
+                description: ResolvedAt is the timestamp at which Resolution was set.
+                format: date-time
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

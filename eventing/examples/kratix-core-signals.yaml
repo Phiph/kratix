@@ -1,0 +1,228 @@
+# PromiseSignals taxonomy for Kratix core itself.
+#
+# Kratix's own controllers emit a set of CloudEvents about Promise and
+# Resource lifecycle. This document is the producer-side contract for those
+# events — the same shape any Promise author would ship alongside their
+# Promise to declare what they emit.
+#
+# This file is documentation. v0.1 has no controller reading it. Its job is
+# to (a) give consumers a stable reference for the kratix.* namespace,
+# (b) prove the PromiseSignals shape on a real producer, and (c) serve as a
+# template for downstream producers.
+#
+# Source of truth for what is actually emitted:
+#   internal/controller/promise_controller.go
+#   internal/controller/dynamic_resource_request_controller.go
+#
+# Update this file when you add or rename an emitted type.
+apiVersion: eventing.kratix.io/v1alpha1
+kind: PromiseSignals
+metadata:
+  name: kratix-core
+spec:
+  promiseRef:
+    name: kratix-core
+  owner: kratix-platform-team
+  events:
+    # ---- Promise lifecycle ----
+    - type: kratix.promise.unavailable
+      severity: warning
+      stability: alpha
+      sinceVersion: v0.1
+      description: |
+        A Promise has transitioned from Available to Unavailable. Fires when
+        requirements stop being fulfilled, when works begin failing, or when
+        the promise revision is no longer reconcilable.
+      payload:
+        reason: string
+
+    - type: kratix.promise.available
+      severity: info
+      stability: alpha
+      sinceVersion: v0.1
+      description: |
+        A Promise has reached the Available state. The platform contract is
+        being fulfilled and new Resource Requests can be served.
+
+    - type: kratix.promise.reconciling.resources
+      severity: info
+      stability: alpha
+      sinceVersion: v0.1
+      description: |
+        Reconciliation of all Resource Requests for this Promise has started.
+        Emitted in response to the reconcile-resources label.
+
+    - type: kratix.promise.reconcile.succeeded
+      severity: info
+      stability: alpha
+      sinceVersion: v0.1
+      description: Reconciliation of the Promise completed successfully.
+
+    - type: kratix.promise.revision.created
+      severity: info
+      stability: alpha
+      sinceVersion: v0.1
+      description: A new PromiseRevision was created for this Promise.
+      payload:
+        revisionName: string
+
+    - type: kratix.promise.configure.workflow.completed
+      severity: info
+      stability: alpha
+      sinceVersion: v0.1
+      description: All configure workflows for the Promise have completed.
+
+    - type: kratix.promise.delete.pipeline.failed
+      severity: warning
+      stability: alpha
+      sinceVersion: v0.1
+      description: |
+        The Promise's delete pipeline failed. Manual intervention may be
+        required to clean up downstream state before the Promise can be
+        fully removed.
+
+    # ---- Promise works ----
+    - type: kratix.promise.works.failing
+      severity: warning
+      stability: alpha
+      sinceVersion: v0.1
+      description: One or more Works associated with this Promise are failing.
+      payload:
+        failing: array
+
+    - type: kratix.promise.works.misplaced
+      severity: warning
+      stability: alpha
+      sinceVersion: v0.1
+      description: |
+        One or more Works are scheduled to a destination that no longer
+        matches the Promise's destinationSelectors.
+      payload:
+        misplaced: array
+
+    - type: kratix.promise.works.succeeded
+      severity: info
+      stability: alpha
+      sinceVersion: v0.1
+      description: All Works associated with this Promise are ready.
+
+    # ---- Promise requirements ----
+    - type: kratix.promise.requirements.fulfilled
+      severity: info
+      stability: alpha
+      sinceVersion: v0.1
+      description: All required Promises this Promise depends on are available.
+
+    - type: kratix.promise.requirements.not.installed
+      severity: info
+      stability: alpha
+      sinceVersion: v0.1
+      description: |
+        A required Promise is not installed or its state cannot be determined.
+      payload:
+        requiredPromise: string
+
+    - type: kratix.promise.requirements.not.available
+      severity: info
+      stability: alpha
+      sinceVersion: v0.1
+      description: |
+        A required Promise is installed but not yet Available. Reconciliation
+        will continue once it becomes available.
+      payload:
+        requiredPromise: string
+
+    # ---- Promise control plane state ----
+    - type: kratix.paused.reconciliation
+      severity: warning
+      stability: alpha
+      sinceVersion: v0.1
+      description: |
+        Reconciliation paused on operator request (kratix.io/paused label).
+
+    - type: kratix.workflow.suspended
+      severity: warning
+      stability: alpha
+      sinceVersion: v0.1
+      description: |
+        Workflows on this Promise are suspended (kratix.io/workflow-suspended
+        label). Reconciliation will not run until the label is removed.
+
+    # ---- Resource Request lifecycle ----
+    - type: kratix.resource.reconcile.started
+      severity: info
+      stability: alpha
+      sinceVersion: v0.1
+      description: |
+        Reconciliation of a Resource Request started against a specific
+        PromiseRevision.
+      payload:
+        promiseRevision: string
+
+    - type: kratix.resource.binding.created
+      severity: info
+      stability: alpha
+      sinceVersion: v0.1
+      description: |
+        A resource binding was created, attaching this Resource Request to a
+        specific Promise version.
+      payload:
+        bindingName: string
+        promise: string
+        version: string
+
+    - type: kratix.resource.binding.version.updated
+      severity: info
+      stability: alpha
+      sinceVersion: v0.1
+      description: The resource binding version for this Resource Request was updated.
+      payload:
+        version: string
+
+    - type: kratix.resource.reconcile.succeeded
+      severity: info
+      stability: alpha
+      sinceVersion: v0.1
+      description: |
+        The Resource Request reconciled successfully against its currently
+        bound Promise revision.
+
+    - type: kratix.resource.delete.pipeline.failed
+      severity: warning
+      stability: alpha
+      sinceVersion: v0.1
+      description: |
+        The Resource Request's delete pipeline failed. Manual intervention
+        may be needed to clean up downstream state.
+
+    # ---- Resource works ----
+    - type: kratix.resource.works.failing
+      severity: warning
+      stability: alpha
+      sinceVersion: v0.1
+      description: One or more Works for this Resource Request are failing.
+      payload:
+        failing: array
+
+    - type: kratix.resource.works.misplaced
+      severity: warning
+      stability: alpha
+      sinceVersion: v0.1
+      description: One or more Works are scheduled to a non-matching destination.
+      payload:
+        misplaced: array
+
+    - type: kratix.resource.works.succeeded
+      severity: info
+      stability: alpha
+      sinceVersion: v0.1
+      description: All Works for this Resource Request are ready.
+
+    # ---- Resource Request lookup / errors ----
+    - type: kratix.promise.revision.lookup.failed
+      severity: warning
+      stability: alpha
+      sinceVersion: v0.1
+      description: |
+        Failed to fetch the PromiseRevision a Resource Request is bound to.
+        Usually indicates a missing or deleted revision.

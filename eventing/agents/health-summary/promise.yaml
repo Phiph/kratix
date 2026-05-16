@@ -1,0 +1,76 @@
+apiVersion: platform.kratix.io/v1alpha1
+kind: Promise
+metadata:
+  name: health-summary-agent
+  namespace: default
+spec:
+  destinationSelectors:
+    - matchLabels:
+        environment: platform
+  api:
+    apiVersion: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    metadata:
+      name: healthsummaryagents.agents.kratix.io
+    spec:
+      group: agents.kratix.io
+      names:
+        kind: HealthSummaryAgent
+        plural: healthsummaryagents
+        singular: healthsummaryagent
+        shortNames:
+          - hsa
+      scope: Namespaced
+      versions:
+        - name: v1alpha1
+          served: true
+          storage: true
+          schema:
+            openAPIV3Schema:
+              type: object
+              properties:
+                spec:
+                  type: object
+                  properties:
+                    digestSchedule:
+                      type: string
+                      description: >-
+                        Cron expression for digest emission cadence. Defaults
+                        to "@hourly" if unset. The window is always the last
+                        1h regardless of cadence (v0.1 fixed).
+                      default: "@hourly"
+                    subscribe:
+                      type: array
+                      description: >-
+                        CloudEvent type globs the agent observes. Each entry
+                        is an exact match or a trailing "*" wildcard.
+                        Defaults to all kratix.* events.
+                      items:
+                        type: string
+                      default:
+                        - "kratix.*"
+                    image:
+                      type: string
+                      description: >-
+                        Runtime image override. Defaults to the version this
+                        Promise was published with.
+                      default: ghcr.io/syntasso/health-summary-agent:v0.1
+                status:
+                  type: object
+                  properties:
+                    ready:
+                      type: boolean
+                    lastDigestAt:
+                      type: string
+                      format: date-time
+  workflows:
+    resource:
+      configure:
+        - apiVersion: platform.kratix.io/v1alpha1
+          kind: Pipeline
+          metadata:
+            name: scaffold
+          spec:
+            containers:
+              - name: scaffold
+                image: ghcr.io/syntasso/health-summary-agent-pipeline:v0.1
