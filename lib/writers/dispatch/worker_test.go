@@ -269,6 +269,41 @@ var _ = Describe("Worker", func() {
 		Expect(got.Err).To(MatchError(ContainSubstring("just b broke")))
 	})
 
+	It("times out a slow Decide and quarantines only that intent", func() {
+		// This spec uses a real clock because Decide's timeout context is wall-time.
+		// The other specs in this describe use a FakeClock for batch-window timing.
+		realClockCfg := dispatch.DispatcherConfig{
+			BatchWindow:   50 * time.Millisecond,
+			BatchMaxSize:  100,
+			DecideTimeout: 50 * time.Millisecond,
+			Logger:        logr.Discard(),
+		}
+		w := dispatch.NewWorker(dest, fakeBackend, realClockCfg)
+		defer w.Stop()
+
+		chSlow := make(chan dispatch.SubmitResult, 1)
+		chFast := make(chan dispatch.SubmitResult, 1)
+
+		Expect(w.Submit(context.Background(), dispatch.Intent{
+			WorkPlacement: "wp-slow",
+			Decide: func(_ map[string][]byte) (dispatch.Writes, error) {
+				time.Sleep(500 * time.Millisecond)
+				return dispatch.Writes{}, nil
+			},
+		}, chSlow)).To(Succeed())
+		Expect(w.Submit(context.Background(), dispatch.Intent{
+			WorkPlacement: "wp-fast",
+			Decide:        func(_ map[string][]byte) (dispatch.Writes, error) { return dispatch.Writes{}, nil },
+		}, chFast)).To(Succeed())
+
+		var got dispatch.SubmitResult
+		Eventually(chSlow, "2s").Should(Receive(&got))
+		Expect(got.Err).To(MatchError(context.DeadlineExceeded))
+
+		Eventually(chFast, "2s").Should(Receive(&got))
+		Expect(got.Err).NotTo(HaveOccurred())
+	})
+
 	It("dedups intents by (WorkPlacement, SubDir); older intent gets ErrSuperseded", func() {
 		w := dispatch.NewWorker(dest, fakeBackend, cfg)
 		defer w.Stop()

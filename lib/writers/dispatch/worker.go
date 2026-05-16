@@ -3,6 +3,7 @@ package dispatch
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/go-logr/logr"
 	"k8s.io/utils/clock"
@@ -48,6 +49,9 @@ func NewWorker(dest DestinationKey, backend Backend, cfg DispatcherConfig) *Work
 	}
 	if cfg.InboundBufferSize == 0 {
 		cfg.InboundBufferSize = 1000
+	}
+	if cfg.DecideTimeout == 0 {
+		cfg.DecideTimeout = 5 * time.Second
 	}
 	w := &Worker{
 		dest:    dest,
@@ -190,7 +194,9 @@ func (w *Worker) fireBatch(pending []pendingIntent) {
 			}
 		}
 
-		writes, err := p.intent.Decide(intentReads)
+		decideCtx, cancel := context.WithTimeout(ctx, w.cfg.DecideTimeout)
+		writes, err := runDecide(decideCtx, p.intent.Decide, intentReads)
+		cancel()
 		if err != nil {
 			p.resultCh <- SubmitResult{Err: err}
 			continue
@@ -219,5 +225,28 @@ func (w *Worker) fireBatch(pending []pendingIntent) {
 		} else {
 			owner.resultCh <- SubmitResult{Result: Result{VersionID: res.VersionID}}
 		}
+	}
+}
+
+// runDecide invokes the user-supplied Decide on a separate goroutine so the
+// caller can enforce a timeout via context. If the context fires first,
+// runDecide returns ctx.Err(); the Decide goroutine continues until it
+// finishes on its own. Decide is expected to be CPU-only by convention; the
+// runtime cost of an orphaned goroutine is the user's problem.
+func runDecide(ctx context.Context, fn func(map[string][]byte) (Writes, error), reads map[string][]byte) (Writes, error) {
+	type result struct {
+		writes Writes
+		err    error
+	}
+	done := make(chan result, 1)
+	go func() {
+		w, e := fn(reads)
+		done <- result{writes: w, err: e}
+	}()
+	select {
+	case r := <-done:
+		return r.writes, r.err
+	case <-ctx.Done():
+		return Writes{}, ctx.Err()
 	}
 }
