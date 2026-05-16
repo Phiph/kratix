@@ -2,6 +2,7 @@ package dispatch_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -159,5 +160,43 @@ var _ = Describe("Worker", func() {
 		Expect(capturedB).To(HaveKeyWithValue("shared.yaml", []byte("shared")))
 		Expect(capturedB).To(HaveKeyWithValue("intent-b.yaml", []byte("b")))
 		Expect(capturedB).NotTo(HaveKey("intent-a.yaml"))
+	})
+
+	It("quarantines an intent whose Decide returns an error and applies the rest", func() {
+		w := dispatch.NewWorker(dest, fakeBackend, cfg)
+		defer w.Stop()
+
+		wantErr := errors.New("bad intent")
+		chGood := make(chan dispatch.SubmitResult, 1)
+		chBad := make(chan dispatch.SubmitResult, 1)
+
+		Expect(w.Submit(context.Background(), dispatch.Intent{
+			WorkPlacement: "wp-good",
+			Decide: func(_ map[string][]byte) (dispatch.Writes, error) {
+				return dispatch.Writes{ToCreate: []v1alpha1.Workload{{Filepath: "ok.yaml"}}}, nil
+			},
+		}, chGood)).To(Succeed())
+
+		Expect(w.Submit(context.Background(), dispatch.Intent{
+			WorkPlacement: "wp-bad",
+			Decide: func(_ map[string][]byte) (dispatch.Writes, error) {
+				return dispatch.Writes{}, wantErr
+			},
+		}, chBad)).To(Succeed())
+
+		Eventually(fakeClock.HasWaiters).Should(BeTrue())
+		fakeClock.Step(2 * cfg.BatchWindow)
+
+		var got dispatch.SubmitResult
+		Eventually(chBad).Should(Receive(&got))
+		Expect(got.Err).To(MatchError(wantErr))
+
+		Eventually(chGood).Should(Receive(&got))
+		Expect(got.Err).NotTo(HaveOccurred())
+
+		Expect(fakeBackend.ApplyBatchCallCount()).To(Equal(1))
+		_, batch := fakeBackend.ApplyBatchArgsForCall(0)
+		Expect(batch).To(HaveLen(1))
+		Expect(batch[0].WorkPlacement).To(Equal("wp-good"))
 	})
 })
