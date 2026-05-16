@@ -111,7 +111,9 @@ func (w *Worker) run() {
 			return
 		}
 
-		pending := []pendingIntent{first}
+		pending := map[string]pendingIntent{
+			dedupKey(first.intent): first,
+		}
 
 		timer := w.clock.NewTimer(w.cfg.BatchWindow)
 
@@ -119,7 +121,11 @@ func (w *Worker) run() {
 		for len(pending) < w.cfg.BatchMaxSize {
 			select {
 			case p := <-w.inbound:
-				pending = append(pending, p)
+				key := dedupKey(p.intent)
+				if old, exists := pending[key]; exists {
+					old.resultCh <- SubmitResult{Err: ErrSuperseded}
+				}
+				pending[key] = p
 			case <-timer.C():
 				break drain
 			case <-w.stopCh:
@@ -129,8 +135,18 @@ func (w *Worker) run() {
 		}
 		timer.Stop()
 
-		w.fireBatch(pending)
+		// Snapshot to a slice in iteration order for the batch.
+		batch := make([]pendingIntent, 0, len(pending))
+		for _, p := range pending {
+			batch = append(batch, p)
+		}
+		w.fireBatch(batch)
 	}
+}
+
+// dedupKey is the canonical (WorkPlacement, SubDir) key for batching/dedup.
+func dedupKey(intent Intent) string {
+	return intent.WorkPlacement + "|" + intent.SubDir
 }
 
 // fireBatch resolves the pending intents via their Decide callbacks and
@@ -180,7 +196,7 @@ func (w *Worker) fireBatch(pending []pendingIntent) {
 			continue
 		}
 
-		key := p.intent.WorkPlacement + "|" + p.intent.SubDir
+		key := dedupKey(p.intent)
 		resolved = append(resolved, ResolvedIntent{
 			Key:           key,
 			WorkPlacement: p.intent.WorkPlacement,

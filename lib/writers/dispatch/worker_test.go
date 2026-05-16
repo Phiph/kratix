@@ -232,4 +232,41 @@ var _ = Describe("Worker", func() {
 
 		Expect(fakeBackend.ApplyBatchCallCount()).To(BeZero())
 	})
+
+	It("dedups intents by (WorkPlacement, SubDir); older intent gets ErrSuperseded", func() {
+		w := dispatch.NewWorker(dest, fakeBackend, cfg)
+		defer w.Stop()
+
+		chOld := make(chan dispatch.SubmitResult, 1)
+		chNew := make(chan dispatch.SubmitResult, 1)
+
+		makeIntent := func(label string) dispatch.Intent {
+			return dispatch.Intent{
+				WorkPlacement: "wp-same",
+				SubDir:        "same-sub",
+				Decide: func(_ map[string][]byte) (dispatch.Writes, error) {
+					return dispatch.Writes{ToCreate: []v1alpha1.Workload{{Filepath: label}}}, nil
+				},
+			}
+		}
+
+		Expect(w.Submit(context.Background(), makeIntent("old.yaml"), chOld)).To(Succeed())
+		// Allow the first intent to be picked up before the second arrives.
+		Eventually(fakeClock.HasWaiters).Should(BeTrue())
+		Expect(w.Submit(context.Background(), makeIntent("new.yaml"), chNew)).To(Succeed())
+
+		fakeClock.Step(2 * cfg.BatchWindow)
+
+		var got dispatch.SubmitResult
+		Eventually(chOld).Should(Receive(&got))
+		Expect(got.Err).To(MatchError(dispatch.ErrSuperseded))
+
+		Eventually(chNew).Should(Receive(&got))
+		Expect(got.Err).NotTo(HaveOccurred())
+
+		Expect(fakeBackend.ApplyBatchCallCount()).To(Equal(1))
+		_, batch := fakeBackend.ApplyBatchArgsForCall(0)
+		Expect(batch).To(HaveLen(1))
+		Expect(batch[0].Writes.ToCreate[0].Filepath).To(Equal("new.yaml"))
+	})
 })
