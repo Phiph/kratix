@@ -252,3 +252,41 @@ var _ = Describe("Dispatcher.Cleanup", func() {
 		Expect(err).To(HaveOccurred())
 	})
 })
+
+var _ = Describe("Dispatcher.Shutdown", func() {
+	It("drains workers and rejects subsequent Submit calls", func() {
+		fakeClock := clocktesting.NewFakeClock(time.Unix(0, 0))
+		fakeBackend := &dispatchfakes.FakeBackend{}
+		fakeBackend.ApplyBatchReturns(dispatch.BatchResult{VersionID: "sha"})
+
+		key := dispatch.DestinationKey{StateStoreKind: "GitStateStore", StateStoreName: "g"}
+		cfg := dispatch.DispatcherConfig{
+			BatchWindow: 100 * time.Millisecond,
+			Clock:       fakeClock,
+			Logger:      logr.Discard(),
+			NewGitBackend: func(_ logr.Logger, _ dispatch.DestinationKey, _ v1alpha1.GitStateStoreSpec, _ map[string][]byte) (dispatch.Backend, error) {
+				return fakeBackend, nil
+			},
+		}
+		d := dispatch.NewDispatcher(cfg)
+		Expect(d.RegisterGitDestination(key, v1alpha1.GitStateStoreSpec{}, nil)).To(Succeed())
+
+		intent := dispatch.Intent{
+			WorkPlacement: "wp",
+			Decide:        func(_ map[string][]byte) (dispatch.Writes, error) { return dispatch.Writes{}, nil },
+		}
+		done := make(chan error, 1)
+		go func() {
+			_, err := d.Submit(context.Background(), key, intent)
+			done <- err
+		}()
+		Eventually(fakeClock.HasWaiters).Should(BeTrue())
+		fakeClock.Step(2 * cfg.BatchWindow)
+		Eventually(done).Should(Receive(Succeed()))
+
+		Expect(d.Shutdown(context.Background())).To(Succeed())
+
+		_, err := d.Submit(context.Background(), key, intent)
+		Expect(err).To(MatchError(dispatch.ErrShuttingDown))
+	})
+})
