@@ -2,9 +2,13 @@ package workflow
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 	"time"
 
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -38,6 +42,108 @@ type Opts struct {
 
 	// Set by other controllers that use the Workflow engine
 	SkipConditions bool
+
+	// SharedResourceCache, if non-nil, deduplicates apply operations for
+	// pipeline resources whose names are deterministic per Promise+Pipeline
+	// (ServiceAccount, RBAC, scheduling ConfigMap). The cache is consulted
+	// before each Create, and updated after a successful apply.
+	SharedResourceCache *SharedResourceCache
+
+	// SharedResourceScope namespaces cache entries so that a Promise being
+	// deleted and recreated (same name, different UID) cannot reuse the old
+	// Promise's "Applied" markers. Callers should pass the owning Promise UID.
+	SharedResourceScope string
+}
+
+// SharedResourceCache tracks which pipeline-shared resources the controller has
+// already successfully applied, so concurrent reconciles across many resource
+// requests don't repeatedly Create-then-Update the same ServiceAccount / Role /
+// RoleBinding / ConfigMap.
+//
+// Cache entries are keyed by (scope, GVK, ns, name, content-hash) and expire
+// after sharedResourceCacheTTL so that:
+//   - A spec change to a pipeline resource produces a new key (different hash),
+//     causing the next reconcile to re-apply.
+//   - An out-of-band deletion of the on-cluster resource is recovered within
+//     the TTL window rather than requiring an operator restart.
+type SharedResourceCache struct {
+	mu      sync.Mutex
+	applied map[string]time.Time
+	ttl     time.Duration
+	now     func() time.Time
+}
+
+// sharedResourceCacheTTL bounds how long an "Applied" marker is trusted before
+// the next reconcile must re-issue the apply. 5 minutes keeps cache hits high
+// for tight reconcile loops while bounding recovery time after manual deletion.
+const sharedResourceCacheTTL = 5 * time.Minute
+
+// NewSharedResourceCache returns an empty cache with the default TTL.
+func NewSharedResourceCache() *SharedResourceCache {
+	return &SharedResourceCache{
+		applied: make(map[string]time.Time),
+		ttl:     sharedResourceCacheTTL,
+		now:     time.Now,
+	}
+}
+
+// Applied reports whether the given resource has been applied recently. Scope
+// is typically the owning Promise UID — when a Promise is deleted and
+// recreated, the new UID produces a fresh cache namespace.
+func (c *SharedResourceCache) Applied(scope string, obj client.Object) bool {
+	if c == nil {
+		return false
+	}
+	key := sharedResourceKey(scope, obj)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	expiresAt, ok := c.applied[key]
+	if !ok {
+		return false
+	}
+	if c.now().After(expiresAt) {
+		delete(c.applied, key)
+		return false
+	}
+	return true
+}
+
+// MarkApplied records that the given resource has been successfully applied
+// under the supplied scope, with an expiry of now+TTL.
+func (c *SharedResourceCache) MarkApplied(scope string, obj client.Object) {
+	if c == nil {
+		return
+	}
+	key := sharedResourceKey(scope, obj)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.applied[key] = c.now().Add(c.ttl)
+}
+
+// sharedResourceKey produces a key that varies with the resource's content.
+// Two objects with identical GVK+ns+name but different specs produce different
+// keys, so a spec change forces the next reconcile to re-apply.
+func sharedResourceKey(scope string, obj client.Object) string {
+	gvk := obj.GetObjectKind().GroupVersionKind()
+	return fmt.Sprintf("%s|%s/%s/%s|%s",
+		scope,
+		gvk.GroupKind().String(),
+		obj.GetNamespace(),
+		obj.GetName(),
+		contentHash(obj),
+	)
+}
+
+// contentHash returns a short stable hash of the object's marshalled form.
+// Hash failures degrade to a constant sentinel so callers still get safe
+// (cache-miss) behaviour rather than a panic.
+func contentHash(obj client.Object) string {
+	bytes, err := json.Marshal(obj)
+	if err != nil {
+		return "unhashable"
+	}
+	sum := sha256.Sum256(bytes)
+	return hex.EncodeToString(sum[:8])
 }
 
 func (o *Opts) SetParentObject(parentObj *unstructured.Unstructured) {
