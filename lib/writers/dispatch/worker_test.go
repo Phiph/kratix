@@ -369,4 +369,26 @@ var _ = Describe("Worker", func() {
 		Expect(batch).To(HaveLen(1))
 		Expect(batch[0].Writes.ToCreate[0].Filepath).To(Equal("new.yaml"))
 	})
+
+	It("on Stop, drains pending intents with ErrShuttingDown", func() {
+		// Use a long batch window so intents sit in pending when we Stop.
+		cfg.BatchWindow = 10 * time.Second
+		w := dispatch.NewWorker(dest, fakeBackend, cfg)
+
+		ch := make(chan dispatch.SubmitResult, 1)
+		Expect(w.Submit(context.Background(), dispatch.Intent{
+			WorkPlacement: "wp",
+			Decide:        func(_ map[string][]byte) (dispatch.Writes, error) { return dispatch.Writes{}, nil },
+		}, ch)).To(Succeed())
+
+		// Wait for the worker to start its timer (intent picked up into pending).
+		Eventually(fakeClock.HasWaiters).Should(BeTrue())
+
+		w.Stop()
+
+		var got dispatch.SubmitResult
+		Eventually(ch).Should(Receive(&got))
+		Expect(got.Err).To(MatchError(dispatch.ErrShuttingDown))
+		Expect(fakeBackend.ApplyBatchCallCount()).To(BeZero())
+	})
 })

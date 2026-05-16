@@ -135,7 +135,10 @@ func (w *Worker) run() {
 				break drain
 			case <-w.stopCh:
 				timer.Stop()
-				break drain
+				for _, p := range pending {
+					p.resultCh <- SubmitResult{Err: ErrShuttingDown}
+				}
+				return
 			}
 		}
 		timer.Stop()
