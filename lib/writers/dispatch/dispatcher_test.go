@@ -210,3 +210,45 @@ var _ = Describe("Dispatcher.Validate", func() {
 		Expect(validateFake.CloseCallCount()).To(Equal(1))
 	})
 })
+
+var _ = Describe("Dispatcher.Cleanup", func() {
+	It("stops the worker and Submit returns an error after Cleanup", func() {
+		fakeClock := clocktesting.NewFakeClock(time.Unix(0, 0))
+		fakeBackend := &dispatchfakes.FakeBackend{}
+		fakeBackend.ApplyBatchReturns(dispatch.BatchResult{VersionID: "sha"})
+
+		key := dispatch.DestinationKey{StateStoreKind: "GitStateStore", StateStoreName: "g", Branch: "main"}
+		cfg := dispatch.DispatcherConfig{
+			BatchWindow: 100 * time.Millisecond,
+			Clock:       fakeClock,
+			Logger:      logr.Discard(),
+			NewGitBackend: func(_ logr.Logger, _ dispatch.DestinationKey, _ v1alpha1.GitStateStoreSpec, _ map[string][]byte) (dispatch.Backend, error) {
+				return fakeBackend, nil
+			},
+		}
+		d := dispatch.NewDispatcher(cfg)
+		defer d.Shutdown(context.Background())
+		Expect(d.RegisterGitDestination(key, v1alpha1.GitStateStoreSpec{}, nil)).To(Succeed())
+
+		// First submit creates the worker.
+		intent := dispatch.Intent{
+			WorkPlacement: "wp",
+			Decide:        func(_ map[string][]byte) (dispatch.Writes, error) { return dispatch.Writes{}, nil },
+		}
+		done := make(chan error, 1)
+		go func() {
+			_, err := d.Submit(context.Background(), key, intent)
+			done <- err
+		}()
+		Eventually(fakeClock.HasWaiters).Should(BeTrue())
+		fakeClock.Step(2 * cfg.BatchWindow)
+		Eventually(done).Should(Receive(Succeed()))
+
+		// Cleanup.
+		Expect(d.Cleanup(key)).To(Succeed())
+
+		// Submit after cleanup should fail (destination not registered).
+		_, err := d.Submit(context.Background(), key, intent)
+		Expect(err).To(HaveOccurred())
+	})
+})
