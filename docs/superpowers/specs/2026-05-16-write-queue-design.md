@@ -107,6 +107,15 @@ A secondary effect is that `BucketStateStore` writes are also serialised through
 // Dispatcher is the entry point for all state-store writes.
 // One instance per controller pod, shared by all reconcilers.
 type Dispatcher interface {
+    // RegisterGitDestination binds a Git state-store spec and credentials to
+    // a DestinationKey so subsequent Submit and Validate calls can lazy-
+    // construct a backend. Called by the GitStateStore controller during
+    // its reconcile (where the spec and creds are already in hand).
+    RegisterGitDestination(key DestinationKey, spec v1alpha1.GitStateStoreSpec, creds map[string][]byte) error
+
+    // RegisterS3Destination is the S3 counterpart of RegisterGitDestination.
+    RegisterS3Destination(key DestinationKey, spec v1alpha1.BucketStateStoreSpec, creds map[string][]byte) error
+
     // Submit enqueues an intent for the given destination and blocks until
     // the batch it joined has been applied (or failed).
     //
@@ -128,6 +137,14 @@ type Dispatcher interface {
     Shutdown(ctx context.Context) error
 }
 ```
+
+The Register methods exist so the Dispatcher does not need to call into
+the Kubernetes API itself to resolve a `DestinationKey` to a state-store
+spec and a credentials secret. The state-store controllers already hold
+both during their reconcile and are the natural place to register; this
+also means cred rotation flows through the same path (re-registering
+overwrites the cached spec and creds). Backends are still constructed
+lazily on first `Submit` or `Validate`, not at registration time.
 
 ### Identity
 
