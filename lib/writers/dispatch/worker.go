@@ -38,8 +38,9 @@ type Worker struct {
 	stopCh  chan struct{}
 	doneCh  chan struct{}
 
-	mu      sync.Mutex
-	stopped bool
+	mu         sync.Mutex
+	stopped    bool
+	stopReason error // set by StopWithReason; read after stopCh is closed
 }
 
 // NewWorker creates a Worker and starts its goroutine. Callers must call
@@ -89,9 +90,17 @@ func (w *Worker) Submit(ctx context.Context, intent Intent, resultCh chan<- Subm
 	}
 }
 
-// Stop signals the worker to drain and exit. Blocks until the worker
-// goroutine has returned. Safe to call multiple times.
+// Stop signals the worker to drain pending intents with ErrShuttingDown and
+// exit. Blocks until the worker goroutine has returned. Safe to call multiple
+// times.
 func (w *Worker) Stop() {
+	w.StopWithReason(ErrShuttingDown)
+}
+
+// StopWithReason signals the worker to drain pending intents with the
+// supplied error and exit. Blocks until the worker goroutine has returned.
+// Used by Dispatcher.Cleanup to deliver ErrDestinationGone.
+func (w *Worker) StopWithReason(reason error) {
 	w.mu.Lock()
 	if w.stopped {
 		w.mu.Unlock()
@@ -99,6 +108,7 @@ func (w *Worker) Stop() {
 		return
 	}
 	w.stopped = true
+	w.stopReason = reason
 	close(w.stopCh)
 	w.mu.Unlock()
 	<-w.doneCh
@@ -135,8 +145,12 @@ func (w *Worker) run() {
 				break drain
 			case <-w.stopCh:
 				timer.Stop()
+				reason := w.stopReason
+				if reason == nil {
+					reason = ErrShuttingDown
+				}
 				for _, p := range pending {
-					p.resultCh <- SubmitResult{Err: ErrShuttingDown}
+					p.resultCh <- SubmitResult{Err: reason}
 				}
 				return
 			}

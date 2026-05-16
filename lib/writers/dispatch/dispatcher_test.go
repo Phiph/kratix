@@ -125,6 +125,45 @@ var _ = Describe("Dispatcher.Submit", func() {
 	})
 })
 
+var _ = Describe("Dispatcher.Cleanup delivery", func() {
+	It("delivers ErrDestinationGone to pending intents when Cleanup is called", func() {
+		fakeClock := clocktesting.NewFakeClock(time.Unix(0, 0))
+		fakeBackend := &dispatchfakes.FakeBackend{}
+		fakeBackend.ApplyBatchReturns(dispatch.BatchResult{VersionID: "sha"})
+
+		key := dispatch.DestinationKey{StateStoreKind: "GitStateStore", StateStoreName: "g", Branch: "main"}
+		cfg := dispatch.DispatcherConfig{
+			BatchWindow:  10 * time.Second, // long enough that the intent sits in pending
+			BatchMaxSize: 100,
+			Clock:        fakeClock,
+			Logger:       logr.Discard(),
+			NewGitBackend: func(_ logr.Logger, _ dispatch.DestinationKey, _ v1alpha1.GitStateStoreSpec, _ map[string][]byte) (dispatch.Backend, error) {
+				return fakeBackend, nil
+			},
+		}
+		d := dispatch.NewDispatcher(cfg)
+		defer d.Shutdown(context.Background())
+		Expect(d.RegisterGitDestination(key, v1alpha1.GitStateStoreSpec{}, nil)).To(Succeed())
+
+		submitResult := make(chan error, 1)
+		go func() {
+			_, err := d.Submit(context.Background(), key, dispatch.Intent{
+				WorkPlacement: "wp",
+				Decide:        func(_ map[string][]byte) (dispatch.Writes, error) { return dispatch.Writes{}, nil },
+			})
+			submitResult <- err
+		}()
+		// Wait for the worker to pick up the intent (it's now waiting in the batch window).
+		Eventually(fakeClock.HasWaiters).Should(BeTrue())
+
+		Expect(d.Cleanup(key)).To(Succeed())
+
+		var err error
+		Eventually(submitResult).Should(Receive(&err))
+		Expect(err).To(MatchError(dispatch.ErrDestinationGone))
+	})
+})
+
 var _ = Describe("Dispatcher misc", func() {
 	It("can be constructed and Shutdown without ever doing work", func() {
 		d := dispatch.NewDispatcher(dispatch.DispatcherConfig{Logger: logr.Discard()})

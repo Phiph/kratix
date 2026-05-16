@@ -203,7 +203,7 @@ func (d *dispatcher) Validate(ctx context.Context, dest DestinationKey) error {
 }
 
 // Cleanup tears down the worker for dest. Pending intents fail with
-// ErrShuttingDown via the worker's stop path.
+// ErrDestinationGone via the worker's stop path.
 func (d *dispatcher) Cleanup(dest DestinationKey) error {
 	d.mu.Lock()
 	w, ok := d.workers[dest]
@@ -213,7 +213,7 @@ func (d *dispatcher) Cleanup(dest DestinationKey) error {
 	delete(d.specs, dest)
 	d.mu.Unlock()
 	if w != nil {
-		w.Stop()
+		w.StopWithReason(ErrDestinationGone)
 	}
 	return nil
 }
