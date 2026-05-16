@@ -199,4 +199,37 @@ var _ = Describe("Worker", func() {
 		Expect(batch).To(HaveLen(1))
 		Expect(batch[0].WorkPlacement).To(Equal("wp-good"))
 	})
+
+	It("fails every intent in the batch when backend.Read fails", func() {
+		wantErr := errors.New("read exploded")
+		fakeBackend.ReadReturns(nil, wantErr)
+
+		w := dispatch.NewWorker(dest, fakeBackend, cfg)
+		defer w.Stop()
+
+		chA := make(chan dispatch.SubmitResult, 1)
+		chB := make(chan dispatch.SubmitResult, 1)
+
+		Expect(w.Submit(context.Background(), dispatch.Intent{
+			WorkPlacement: "wp-a",
+			Reads:         []string{"foo.yaml"},
+			Decide:        func(_ map[string][]byte) (dispatch.Writes, error) { return dispatch.Writes{}, nil },
+		}, chA)).To(Succeed())
+		Expect(w.Submit(context.Background(), dispatch.Intent{
+			WorkPlacement: "wp-b",
+			Reads:         []string{"foo.yaml"},
+			Decide:        func(_ map[string][]byte) (dispatch.Writes, error) { return dispatch.Writes{}, nil },
+		}, chB)).To(Succeed())
+
+		Eventually(fakeClock.HasWaiters).Should(BeTrue())
+		fakeClock.Step(2 * cfg.BatchWindow)
+
+		var got dispatch.SubmitResult
+		Eventually(chA).Should(Receive(&got))
+		Expect(got.Err).To(MatchError(wantErr))
+		Eventually(chB).Should(Receive(&got))
+		Expect(got.Err).To(MatchError(wantErr))
+
+		Expect(fakeBackend.ApplyBatchCallCount()).To(BeZero())
+	})
 })
