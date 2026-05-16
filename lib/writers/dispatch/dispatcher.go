@@ -6,6 +6,11 @@ package dispatch
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync"
+	"time"
+
+	"k8s.io/utils/clock"
 
 	"github.com/syntasso/kratix/api/v1alpha1"
 )
@@ -72,6 +77,16 @@ type Result struct {
 // Dispatcher is the entry point for all state-store writes.
 // One instance per controller pod, shared by all reconcilers.
 type Dispatcher interface {
+	// RegisterGitDestination binds a Git state-store spec and credentials to
+	// a DestinationKey so subsequent Submit and Validate calls can lazy-
+	// construct a backend. Called by the GitStateStore controller during its
+	// reconcile (where the spec and creds are already in hand). Re-registering
+	// the same key overwrites the previous spec and credentials.
+	RegisterGitDestination(key DestinationKey, spec v1alpha1.GitStateStoreSpec, creds map[string][]byte) error
+
+	// RegisterS3Destination is the S3 counterpart of RegisterGitDestination.
+	RegisterS3Destination(key DestinationKey, spec v1alpha1.BucketStateStoreSpec, creds map[string][]byte) error
+
 	// Submit enqueues an intent and blocks until its batch completes.
 	Submit(ctx context.Context, dest DestinationKey, intent Intent) (Result, error)
 
@@ -85,4 +100,192 @@ type Dispatcher interface {
 
 	// Shutdown drains all workers and stops. Called on pod shutdown.
 	Shutdown(ctx context.Context) error
+}
+
+//counterfeiter:generate . Dispatcher
+
+// dispatcher is the concrete Dispatcher.
+type dispatcher struct {
+	cfg DispatcherConfig
+
+	mu       sync.Mutex
+	workers  map[DestinationKey]*Worker
+	specs    map[DestinationKey]registeredSpec
+	shutdown bool
+}
+
+// registeredSpec holds the state-store spec and credentials supplied via
+// RegisterGitDestination / RegisterS3Destination. Exactly one of gitSpec
+// or s3Spec is non-nil.
+type registeredSpec struct {
+	gitSpec *v1alpha1.GitStateStoreSpec
+	s3Spec  *v1alpha1.BucketStateStoreSpec
+	creds   map[string][]byte
+}
+
+// NewDispatcher constructs a Dispatcher with the supplied configuration.
+// Zero-valued config fields are filled with package defaults.
+func NewDispatcher(cfg DispatcherConfig) Dispatcher {
+	if cfg.BatchWindow == 0 {
+		cfg.BatchWindow = 500 * time.Millisecond
+	}
+	if cfg.BatchMaxSize == 0 {
+		cfg.BatchMaxSize = 100
+	}
+	if cfg.SubmitTimeout == 0 {
+		cfg.SubmitTimeout = 30 * time.Second
+	}
+	if cfg.DecideTimeout == 0 {
+		cfg.DecideTimeout = 5 * time.Second
+	}
+	if cfg.InboundBufferSize == 0 {
+		cfg.InboundBufferSize = 1000
+	}
+	if cfg.Clock == nil {
+		cfg.Clock = clock.RealClock{}
+	}
+	return &dispatcher{
+		cfg:     cfg,
+		workers: map[DestinationKey]*Worker{},
+		specs:   map[DestinationKey]registeredSpec{},
+	}
+}
+
+// RegisterGitDestination binds a Git state-store spec and credentials to dest.
+func (d *dispatcher) RegisterGitDestination(key DestinationKey, spec v1alpha1.GitStateStoreSpec, creds map[string][]byte) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.shutdown {
+		return ErrShuttingDown
+	}
+	d.specs[key] = registeredSpec{gitSpec: &spec, creds: creds}
+	return nil
+}
+
+// RegisterS3Destination binds an S3 state-store spec and credentials to dest.
+func (d *dispatcher) RegisterS3Destination(key DestinationKey, spec v1alpha1.BucketStateStoreSpec, creds map[string][]byte) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.shutdown {
+		return ErrShuttingDown
+	}
+	d.specs[key] = registeredSpec{s3Spec: &spec, creds: creds}
+	return nil
+}
+
+// Submit enqueues an intent and blocks until its batch completes.
+func (d *dispatcher) Submit(ctx context.Context, dest DestinationKey, intent Intent) (Result, error) {
+	w, err := d.getOrCreateWorker(dest)
+	if err != nil {
+		return Result{}, err
+	}
+	resultCh := make(chan SubmitResult, 1)
+	if err := w.Submit(ctx, intent, resultCh); err != nil {
+		return Result{}, err
+	}
+	select {
+	case r := <-resultCh:
+		return r.Result, r.Err
+	case <-ctx.Done():
+		return Result{}, ctx.Err()
+	}
+}
+
+// Validate checks credentials and write permissions against dest using a
+// throwaway backend.
+func (d *dispatcher) Validate(ctx context.Context, dest DestinationKey) error {
+	b, err := d.constructBackend(dest)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = b.Close() }()
+	return b.Validate(ctx)
+}
+
+// Cleanup tears down the worker for dest. Pending intents fail with
+// ErrShuttingDown via the worker's stop path.
+func (d *dispatcher) Cleanup(dest DestinationKey) error {
+	d.mu.Lock()
+	w, ok := d.workers[dest]
+	if ok {
+		delete(d.workers, dest)
+	}
+	delete(d.specs, dest)
+	d.mu.Unlock()
+	if w != nil {
+		w.Stop()
+	}
+	return nil
+}
+
+// Shutdown drains all workers and stops the dispatcher.
+func (d *dispatcher) Shutdown(ctx context.Context) error {
+	d.mu.Lock()
+	d.shutdown = true
+	workers := make([]*Worker, 0, len(d.workers))
+	for _, w := range d.workers {
+		workers = append(workers, w)
+	}
+	d.workers = map[DestinationKey]*Worker{}
+	d.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		for _, w := range workers {
+			w.Stop()
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (d *dispatcher) getOrCreateWorker(dest DestinationKey) (*Worker, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if d.shutdown {
+		return nil, ErrShuttingDown
+	}
+	if w, ok := d.workers[dest]; ok {
+		return w, nil
+	}
+	b, err := d.constructBackendLocked(dest)
+	if err != nil {
+		return nil, err
+	}
+	w := NewWorker(dest, b, d.cfg)
+	d.workers[dest] = w
+	return w, nil
+}
+
+func (d *dispatcher) constructBackend(dest DestinationKey) (Backend, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.constructBackendLocked(dest)
+}
+
+func (d *dispatcher) constructBackendLocked(dest DestinationKey) (Backend, error) {
+	spec, ok := d.specs[dest]
+	if !ok {
+		return nil, fmt.Errorf("destination not registered: %+v", dest)
+	}
+	switch {
+	case spec.gitSpec != nil:
+		if d.cfg.NewGitBackend == nil {
+			return nil, errors.New("NewGitBackend not configured")
+		}
+		return d.cfg.NewGitBackend(d.cfg.Logger, dest, *spec.gitSpec, spec.creds)
+	case spec.s3Spec != nil:
+		if d.cfg.NewS3Backend == nil {
+			return nil, errors.New("NewS3Backend not configured")
+		}
+		return d.cfg.NewS3Backend(d.cfg.Logger, dest, *spec.s3Spec, spec.creds)
+	default:
+		return nil, fmt.Errorf("destination %+v has no spec", dest)
+	}
 }
