@@ -139,16 +139,50 @@ func (w *Worker) run() {
 func (w *Worker) fireBatch(pending []pendingIntent) {
 	ctx := context.Background()
 
+	// Collect unique read paths across the batch.
+	readSet := map[string]struct{}{}
+	for _, p := range pending {
+		for _, path := range p.intent.Reads {
+			readSet[path] = struct{}{}
+		}
+	}
+	allPaths := make([]string, 0, len(readSet))
+	for path := range readSet {
+		allPaths = append(allPaths, path)
+	}
+
+	var reads map[string][]byte
+	if len(allPaths) > 0 {
+		var err error
+		reads, err = w.backend.Read(ctx, allPaths)
+		if err != nil {
+			for _, p := range pending {
+				p.resultCh <- SubmitResult{Err: err}
+			}
+			return
+		}
+	}
+
+	// Resolve each intent: slice its reads, run Decide, quarantine on error.
 	resolved := make([]ResolvedIntent, 0, len(pending))
 	owners := make([]pendingIntent, 0, len(pending))
 	for _, p := range pending {
-		writes, err := p.intent.Decide(nil)
+		intentReads := map[string][]byte{}
+		for _, path := range p.intent.Reads {
+			if v, ok := reads[path]; ok {
+				intentReads[path] = v
+			}
+		}
+
+		writes, err := p.intent.Decide(intentReads)
 		if err != nil {
 			p.resultCh <- SubmitResult{Err: err}
 			continue
 		}
+
+		key := p.intent.WorkPlacement + "|" + p.intent.SubDir
 		resolved = append(resolved, ResolvedIntent{
-			Key:           p.intent.WorkPlacement + "|" + p.intent.SubDir,
+			Key:           key,
 			WorkPlacement: p.intent.WorkPlacement,
 			SubDir:        p.intent.SubDir,
 			Writes:        writes,
@@ -163,10 +197,11 @@ func (w *Worker) fireBatch(pending []pendingIntent) {
 	res := w.backend.ApplyBatch(ctx, resolved)
 
 	for i, ri := range resolved {
+		owner := owners[i]
 		if errVal, ok := res.PerIntent[ri.Key]; ok && errVal != nil {
-			owners[i].resultCh <- SubmitResult{Err: errVal}
+			owner.resultCh <- SubmitResult{Err: errVal}
 		} else {
-			owners[i].resultCh <- SubmitResult{Result: Result{VersionID: res.VersionID}}
+			owner.resultCh <- SubmitResult{Result: Result{VersionID: res.VersionID}}
 		}
 	}
 }

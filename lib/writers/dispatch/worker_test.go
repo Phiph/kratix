@@ -107,4 +107,57 @@ var _ = Describe("Worker", func() {
 		_, batch := fakeBackend.ApplyBatchArgsForCall(0)
 		Expect(batch).To(HaveLen(3))
 	})
+
+	It("collects unique reads across all intents and passes them to Decide", func() {
+		fakeBackend.ReadReturns(map[string][]byte{
+			"shared.yaml":   []byte("shared"),
+			"intent-a.yaml": []byte("a"),
+			"intent-b.yaml": []byte("b"),
+		}, nil)
+
+		w := dispatch.NewWorker(dest, fakeBackend, cfg)
+		defer w.Stop()
+
+		var capturedA, capturedB map[string][]byte
+		ch1 := make(chan dispatch.SubmitResult, 1)
+		ch2 := make(chan dispatch.SubmitResult, 1)
+
+		Expect(w.Submit(context.Background(), dispatch.Intent{
+			WorkPlacement: "wp-a",
+			SubDir:        "sub-a",
+			Reads:         []string{"shared.yaml", "intent-a.yaml"},
+			Decide: func(reads map[string][]byte) (dispatch.Writes, error) {
+				capturedA = reads
+				return dispatch.Writes{}, nil
+			},
+		}, ch1)).To(Succeed())
+
+		Expect(w.Submit(context.Background(), dispatch.Intent{
+			WorkPlacement: "wp-b",
+			SubDir:        "sub-b",
+			Reads:         []string{"shared.yaml", "intent-b.yaml"},
+			Decide: func(reads map[string][]byte) (dispatch.Writes, error) {
+				capturedB = reads
+				return dispatch.Writes{}, nil
+			},
+		}, ch2)).To(Succeed())
+
+		Eventually(fakeClock.HasWaiters).Should(BeTrue())
+		fakeClock.Step(2 * cfg.BatchWindow)
+
+		Eventually(ch1).Should(Receive())
+		Eventually(ch2).Should(Receive())
+
+		Expect(fakeBackend.ReadCallCount()).To(Equal(1))
+		_, paths := fakeBackend.ReadArgsForCall(0)
+		Expect(paths).To(ConsistOf("shared.yaml", "intent-a.yaml", "intent-b.yaml"))
+
+		Expect(capturedA).To(HaveKeyWithValue("shared.yaml", []byte("shared")))
+		Expect(capturedA).To(HaveKeyWithValue("intent-a.yaml", []byte("a")))
+		Expect(capturedA).NotTo(HaveKey("intent-b.yaml"))
+
+		Expect(capturedB).To(HaveKeyWithValue("shared.yaml", []byte("shared")))
+		Expect(capturedB).To(HaveKeyWithValue("intent-b.yaml", []byte("b")))
+		Expect(capturedB).NotTo(HaveKey("intent-a.yaml"))
+	})
 })
