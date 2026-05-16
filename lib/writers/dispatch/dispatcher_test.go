@@ -171,5 +171,42 @@ var _ = Describe("Dispatcher misc", func() {
 	})
 })
 
-// Keep `errors` in use so the file compiles if specs change.
-var _ = errors.New
+var _ = Describe("Dispatcher.Validate", func() {
+	var (
+		validateFake *dispatchfakes.FakeBackend
+		cfg          dispatch.DispatcherConfig
+		key          dispatch.DestinationKey
+	)
+
+	BeforeEach(func() {
+		validateFake = &dispatchfakes.FakeBackend{}
+		key = dispatch.DestinationKey{StateStoreKind: "GitStateStore", StateStoreName: "g", Branch: "main"}
+		cfg = dispatch.DispatcherConfig{
+			Logger: logr.Discard(),
+			NewGitBackend: func(_ logr.Logger, _ dispatch.DestinationKey, _ v1alpha1.GitStateStoreSpec, _ map[string][]byte) (dispatch.Backend, error) {
+				return validateFake, nil
+			},
+		}
+	})
+
+	It("constructs a fresh backend, calls Validate, and Closes it; does not create a worker", func() {
+		d := dispatch.NewDispatcher(cfg)
+		defer d.Shutdown(context.Background())
+		Expect(d.RegisterGitDestination(key, v1alpha1.GitStateStoreSpec{Branch: "main"}, nil)).To(Succeed())
+
+		Expect(d.Validate(context.Background(), key)).To(Succeed())
+		Expect(validateFake.ValidateCallCount()).To(Equal(1))
+		Expect(validateFake.CloseCallCount()).To(Equal(1))
+	})
+
+	It("returns the underlying error when Validate fails", func() {
+		validateFake.ValidateReturns(errors.New("bad creds"))
+		d := dispatch.NewDispatcher(cfg)
+		defer d.Shutdown(context.Background())
+		Expect(d.RegisterGitDestination(key, v1alpha1.GitStateStoreSpec{Branch: "main"}, nil)).To(Succeed())
+
+		err := d.Validate(context.Background(), key)
+		Expect(err).To(MatchError("bad creds"))
+		Expect(validateFake.CloseCallCount()).To(Equal(1))
+	})
+})
