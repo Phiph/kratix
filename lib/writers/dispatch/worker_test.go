@@ -304,6 +304,35 @@ var _ = Describe("Worker", func() {
 		Expect(got.Err).NotTo(HaveOccurred())
 	})
 
+	It("recovers from a panic in Decide and surfaces ErrBatchFailed to that caller", func() {
+		w := dispatch.NewWorker(dest, fakeBackend, cfg)
+		defer w.Stop()
+
+		chPanic := make(chan dispatch.SubmitResult, 1)
+		chGood := make(chan dispatch.SubmitResult, 1)
+
+		Expect(w.Submit(context.Background(), dispatch.Intent{
+			WorkPlacement: "wp-panic",
+			Decide: func(_ map[string][]byte) (dispatch.Writes, error) {
+				panic("kaboom")
+			},
+		}, chPanic)).To(Succeed())
+		Expect(w.Submit(context.Background(), dispatch.Intent{
+			WorkPlacement: "wp-good",
+			Decide:        func(_ map[string][]byte) (dispatch.Writes, error) { return dispatch.Writes{}, nil },
+		}, chGood)).To(Succeed())
+
+		Eventually(fakeClock.HasWaiters).Should(BeTrue())
+		fakeClock.Step(2 * cfg.BatchWindow)
+
+		var got dispatch.SubmitResult
+		Eventually(chPanic).Should(Receive(&got))
+		Expect(got.Err).To(MatchError(dispatch.ErrBatchFailed))
+
+		Eventually(chGood).Should(Receive(&got))
+		Expect(got.Err).NotTo(HaveOccurred())
+	})
+
 	It("dedups intents by (WorkPlacement, SubDir); older intent gets ErrSuperseded", func() {
 		w := dispatch.NewWorker(dest, fakeBackend, cfg)
 		defer w.Stop()

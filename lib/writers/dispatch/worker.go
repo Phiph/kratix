@@ -2,6 +2,7 @@ package dispatch
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -231,15 +232,21 @@ func (w *Worker) fireBatch(pending []pendingIntent) {
 // runDecide invokes the user-supplied Decide on a separate goroutine so the
 // caller can enforce a timeout via context. If the context fires first,
 // runDecide returns ctx.Err(); the Decide goroutine continues until it
-// finishes on its own. Decide is expected to be CPU-only by convention; the
-// runtime cost of an orphaned goroutine is the user's problem.
-func runDecide(ctx context.Context, fn func(map[string][]byte) (Writes, error), reads map[string][]byte) (Writes, error) {
+// finishes on its own. A panic in Decide is recovered and surfaced to the
+// caller as ErrBatchFailed; the worker continues processing the rest of the batch.
+// Decide is expected to be CPU-only by convention.
+func runDecide(ctx context.Context, fn func(map[string][]byte) (Writes, error), reads map[string][]byte) (writes Writes, err error) {
 	type result struct {
 		writes Writes
 		err    error
 	}
 	done := make(chan result, 1)
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				done <- result{err: fmt.Errorf("%w: panic in Decide: %v", ErrBatchFailed, r)}
+			}
+		}()
 		w, e := fn(reads)
 		done <- result{writes: w, err: e}
 	}()
