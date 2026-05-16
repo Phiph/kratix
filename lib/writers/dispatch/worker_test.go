@@ -2,6 +2,7 @@ package dispatch_test
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -76,5 +77,34 @@ var _ = Describe("Worker", func() {
 		Expect(batch[0].WorkPlacement).To(Equal("wp-1"))
 		Expect(batch[0].SubDir).To(Equal("sub"))
 		Expect(batch[0].Writes.ToCreate).To(HaveLen(1))
+	})
+
+	It("fires a batch immediately when BatchMaxSize is reached without waiting for the window", func() {
+		cfg.BatchMaxSize = 3
+		cfg.BatchWindow = 1 * time.Hour // would never elapse during the test
+		w := dispatch.NewWorker(dest, fakeBackend, cfg)
+		defer w.Stop()
+
+		resultChs := make([]chan dispatch.SubmitResult, 3)
+		for i := range resultChs {
+			resultChs[i] = make(chan dispatch.SubmitResult, 1)
+			intent := dispatch.Intent{
+				WorkPlacement: "wp",
+				SubDir:        fmt.Sprintf("sub-%d", i),
+				Decide: func(_ map[string][]byte) (dispatch.Writes, error) {
+					return dispatch.Writes{}, nil
+				},
+			}
+			Expect(w.Submit(context.Background(), intent, resultChs[i])).To(Succeed())
+		}
+
+		// All three resultChs should receive without us advancing the clock.
+		for i := range resultChs {
+			Eventually(resultChs[i]).Should(Receive())
+			_ = i
+		}
+		Expect(fakeBackend.ApplyBatchCallCount()).To(Equal(1))
+		_, batch := fakeBackend.ApplyBatchArgsForCall(0)
+		Expect(batch).To(HaveLen(3))
 	})
 })
