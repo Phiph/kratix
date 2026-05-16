@@ -233,6 +233,42 @@ var _ = Describe("Worker", func() {
 		Expect(fakeBackend.ApplyBatchCallCount()).To(BeZero())
 	})
 
+	It("delivers per-intent errors when ApplyBatch returns them", func() {
+		fakeBackend.ApplyBatchReturns(dispatch.BatchResult{
+			VersionID: "sha-2",
+			PerIntent: map[string]error{
+				"wp-a|sub": nil,
+				"wp-b|sub": errors.New("just b broke"),
+			},
+		})
+
+		w := dispatch.NewWorker(dest, fakeBackend, cfg)
+		defer w.Stop()
+
+		chA := make(chan dispatch.SubmitResult, 1)
+		chB := make(chan dispatch.SubmitResult, 1)
+
+		Expect(w.Submit(context.Background(), dispatch.Intent{
+			WorkPlacement: "wp-a", SubDir: "sub",
+			Decide: func(_ map[string][]byte) (dispatch.Writes, error) { return dispatch.Writes{}, nil },
+		}, chA)).To(Succeed())
+		Expect(w.Submit(context.Background(), dispatch.Intent{
+			WorkPlacement: "wp-b", SubDir: "sub",
+			Decide: func(_ map[string][]byte) (dispatch.Writes, error) { return dispatch.Writes{}, nil },
+		}, chB)).To(Succeed())
+
+		Eventually(fakeClock.HasWaiters).Should(BeTrue())
+		fakeClock.Step(2 * cfg.BatchWindow)
+
+		var got dispatch.SubmitResult
+		Eventually(chA).Should(Receive(&got))
+		Expect(got.Err).NotTo(HaveOccurred())
+		Expect(got.Result.VersionID).To(Equal("sha-2"))
+
+		Eventually(chB).Should(Receive(&got))
+		Expect(got.Err).To(MatchError(ContainSubstring("just b broke")))
+	})
+
 	It("dedups intents by (WorkPlacement, SubDir); older intent gets ErrSuperseded", func() {
 		w := dispatch.NewWorker(dest, fakeBackend, cfg)
 		defer w.Stop()
