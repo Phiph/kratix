@@ -562,14 +562,14 @@ func (w *workPlacementReconcileContext) writeWorkloadsToStateStore(destKey dispa
 func (w *workPlacementReconcileContext) buildWriteIntent() (dispatch.Intent, error) {
 	switch w.destination.GetFilepathMode() {
 	case v1alpha1.FilepathModeAggregatedYAML:
+		workload, err := w.getAggregatedWorkload()
+		if err != nil {
+			return dispatch.Intent{}, err
+		}
 		return dispatch.Intent{
 			WorkPlacement: w.workPlacement.Name,
 			SubDir:        "",
 			Decide: func(_ map[string][]byte) (dispatch.Writes, error) {
-				workload, err := w.getAggregatedWorkload()
-				if err != nil {
-					return dispatch.Writes{}, err
-				}
 				return dispatch.Writes{ToCreate: []v1alpha1.Workload{workload}}, nil
 			},
 		}, nil
