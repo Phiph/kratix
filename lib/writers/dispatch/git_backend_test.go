@@ -147,6 +147,33 @@ var _ = Describe("GitBackend integration", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(string(body)).To(Equal("good"))
 	})
+
+	It("on a non-quarantine error, attributes ErrBatchFailed to the failed intent and all remaining intents", func() {
+		b, err := dispatch.NewGitBackend(logr.Discard(), dest, spec, creds)
+		Expect(err).NotTo(HaveOccurred())
+		defer b.Close()
+
+		// First batch: succeeds, primes the worktree.
+		res1 := b.ApplyBatch(context.Background(), []dispatch.ResolvedIntent{{
+			Key: "wp-warm|sub-warm", WorkPlacement: "wp-warm", SubDir: "sub-warm",
+			Writes: dispatch.Writes{ToCreate: []v1alpha1.Workload{{Filepath: "warm.yaml", Content: "warm"}}},
+		}})
+		Expect(res1.PerIntent["wp-warm|sub-warm"]).NotTo(HaveOccurred())
+
+		// Break the remote: delete the bare repo. Subsequent pushes will fail.
+		Expect(os.RemoveAll(bareRepo)).To(Succeed())
+
+		// Second batch: 3 intents. The first one's push will fail; the
+		// remaining two should be marked ErrBatchFailed without being attempted.
+		res2 := b.ApplyBatch(context.Background(), []dispatch.ResolvedIntent{
+			{Key: "a|sub-a", WorkPlacement: "a", SubDir: "sub-a", Writes: dispatch.Writes{ToCreate: []v1alpha1.Workload{{Filepath: "a.yaml", Content: "a"}}}},
+			{Key: "b|sub-b", WorkPlacement: "b", SubDir: "sub-b", Writes: dispatch.Writes{ToCreate: []v1alpha1.Workload{{Filepath: "b.yaml", Content: "b"}}}},
+			{Key: "c|sub-c", WorkPlacement: "c", SubDir: "sub-c", Writes: dispatch.Writes{ToCreate: []v1alpha1.Workload{{Filepath: "c.yaml", Content: "c"}}}},
+		})
+		Expect(res2.PerIntent["a|sub-a"]).To(MatchError(dispatch.ErrBatchFailed))
+		Expect(res2.PerIntent["b|sub-b"]).To(MatchError(dispatch.ErrBatchFailed))
+		Expect(res2.PerIntent["c|sub-c"]).To(MatchError(dispatch.ErrBatchFailed))
+	})
 })
 
 func runGit(dir string, args ...string) {
