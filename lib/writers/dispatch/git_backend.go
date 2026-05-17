@@ -14,6 +14,9 @@ import (
 // GitBackend implements Backend by wrapping writers.GitWriter. Each GitBackend
 // owns one cached git worktree (created at construction via the underlying
 // GitWriter.Init) that lives for the backend's lifetime.
+//
+// GitBackend is not safe for concurrent use. Callers must serialise all method
+// calls; the dispatcher's per-destination worker model does this.
 type GitBackend struct {
 	logger logr.Logger
 	dest   DestinationKey
@@ -94,9 +97,9 @@ func (g *GitBackend) ApplyBatch(_ context.Context, batch []ResolvedIntent) Batch
 	res := BatchResult{PerIntent: make(map[string]error, len(batch))}
 
 	if err := g.writer.Reset(); err != nil {
-		err = fmt.Errorf("git backend: reset: %w", err)
+		wrapped := fmt.Errorf("%w: reset: %w", ErrBatchFailed, err)
 		for _, ri := range batch {
-			res.PerIntent[ri.Key] = err
+			res.PerIntent[ri.Key] = wrapped
 		}
 		return res
 	}
