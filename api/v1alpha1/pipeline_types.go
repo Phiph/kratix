@@ -134,6 +134,9 @@ type Permission struct {
 type JobOptions struct {
 	// Number of retries before marking the pipeline Job as failed
 	BackoffLimit *int32 `json:"backoffLimit,omitempty"`
+	// TTLSecondsAfterFinished sets the Kubernetes Job TTL so completed/failed Jobs
+	// are automatically garbage collected. Nil means no automatic cleanup.
+	TTLSecondsAfterFinished *int32 `json:"ttlSecondsAfterFinished,omitempty"`
 }
 
 // Container defines a single pipeline step container

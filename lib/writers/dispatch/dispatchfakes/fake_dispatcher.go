@@ -468,18 +468,6 @@ func (fake *FakeDispatcher) ValidateReturnsOnCall(i int, result1 error) {
 func (fake *FakeDispatcher) Invocations() map[string][][]interface{} {
 	fake.invocationsMutex.RLock()
 	defer fake.invocationsMutex.RUnlock()
-	fake.cleanupMutex.RLock()
-	defer fake.cleanupMutex.RUnlock()
-	fake.registerGitDestinationMutex.RLock()
-	defer fake.registerGitDestinationMutex.RUnlock()
-	fake.registerS3DestinationMutex.RLock()
-	defer fake.registerS3DestinationMutex.RUnlock()
-	fake.shutdownMutex.RLock()
-	defer fake.shutdownMutex.RUnlock()
-	fake.submitMutex.RLock()
-	defer fake.submitMutex.RUnlock()
-	fake.validateMutex.RLock()
-	defer fake.validateMutex.RUnlock()
 	copiedInvocations := map[string][][]interface{}{}
 	for key, value := range fake.invocations {
 		copiedInvocations[key] = value

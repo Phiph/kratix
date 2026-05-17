@@ -47,6 +47,22 @@ type FakeGitExecutor struct {
 		result1 string
 		result2 error
 	}
+	CommitStub        func(string, string, string, string) (string, error)
+	commitMutex       sync.RWMutex
+	commitArgsForCall []struct {
+		arg1 string
+		arg2 string
+		arg3 string
+		arg4 string
+	}
+	commitReturns struct {
+		result1 string
+		result2 error
+	}
+	commitReturnsOnCall map[int]struct {
+		result1 string
+		result2 error
+	}
 	CommitAndPushStub        func(string, string, string, string) (string, error)
 	commitAndPushMutex       sync.RWMutex
 	commitAndPushArgsForCall []struct {
@@ -86,6 +102,21 @@ type FakeGitExecutor struct {
 		result2 error
 	}
 	pushReturnsOnCall map[int]struct {
+		result1 string
+		result2 error
+	}
+	PushWithRetryStub        func(string, string, string) (string, error)
+	pushWithRetryMutex       sync.RWMutex
+	pushWithRetryArgsForCall []struct {
+		arg1 string
+		arg2 string
+		arg3 string
+	}
+	pushWithRetryReturns struct {
+		result1 string
+		result2 error
+	}
+	pushWithRetryReturnsOnCall map[int]struct {
 		result1 string
 		result2 error
 	}
@@ -317,6 +348,73 @@ func (fake *FakeGitExecutor) CloneReturnsOnCall(i int, result1 string, result2 e
 	}{result1, result2}
 }
 
+func (fake *FakeGitExecutor) Commit(arg1 string, arg2 string, arg3 string, arg4 string) (string, error) {
+	fake.commitMutex.Lock()
+	ret, specificReturn := fake.commitReturnsOnCall[len(fake.commitArgsForCall)]
+	fake.commitArgsForCall = append(fake.commitArgsForCall, struct {
+		arg1 string
+		arg2 string
+		arg3 string
+		arg4 string
+	}{arg1, arg2, arg3, arg4})
+	stub := fake.CommitStub
+	fakeReturns := fake.commitReturns
+	fake.recordInvocation("Commit", []interface{}{arg1, arg2, arg3, arg4})
+	fake.commitMutex.Unlock()
+	if stub != nil {
+		return stub(arg1, arg2, arg3, arg4)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeGitExecutor) CommitCallCount() int {
+	fake.commitMutex.RLock()
+	defer fake.commitMutex.RUnlock()
+	return len(fake.commitArgsForCall)
+}
+
+func (fake *FakeGitExecutor) CommitCalls(stub func(string, string, string, string) (string, error)) {
+	fake.commitMutex.Lock()
+	defer fake.commitMutex.Unlock()
+	fake.CommitStub = stub
+}
+
+func (fake *FakeGitExecutor) CommitArgsForCall(i int) (string, string, string, string) {
+	fake.commitMutex.RLock()
+	defer fake.commitMutex.RUnlock()
+	argsForCall := fake.commitArgsForCall[i]
+	return argsForCall.arg1, argsForCall.arg2, argsForCall.arg3, argsForCall.arg4
+}
+
+func (fake *FakeGitExecutor) CommitReturns(result1 string, result2 error) {
+	fake.commitMutex.Lock()
+	defer fake.commitMutex.Unlock()
+	fake.CommitStub = nil
+	fake.commitReturns = struct {
+		result1 string
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeGitExecutor) CommitReturnsOnCall(i int, result1 string, result2 error) {
+	fake.commitMutex.Lock()
+	defer fake.commitMutex.Unlock()
+	fake.CommitStub = nil
+	if fake.commitReturnsOnCall == nil {
+		fake.commitReturnsOnCall = make(map[int]struct {
+			result1 string
+			result2 error
+		})
+	}
+	fake.commitReturnsOnCall[i] = struct {
+		result1 string
+		result2 error
+	}{result1, result2}
+}
+
 func (fake *FakeGitExecutor) CommitAndPush(arg1 string, arg2 string, arg3 string, arg4 string) (string, error) {
 	fake.commitAndPushMutex.Lock()
 	ret, specificReturn := fake.commitAndPushReturnsOnCall[len(fake.commitAndPushArgsForCall)]
@@ -505,6 +603,72 @@ func (fake *FakeGitExecutor) PushReturnsOnCall(i int, result1 string, result2 er
 	}{result1, result2}
 }
 
+func (fake *FakeGitExecutor) PushWithRetry(arg1 string, arg2 string, arg3 string) (string, error) {
+	fake.pushWithRetryMutex.Lock()
+	ret, specificReturn := fake.pushWithRetryReturnsOnCall[len(fake.pushWithRetryArgsForCall)]
+	fake.pushWithRetryArgsForCall = append(fake.pushWithRetryArgsForCall, struct {
+		arg1 string
+		arg2 string
+		arg3 string
+	}{arg1, arg2, arg3})
+	stub := fake.PushWithRetryStub
+	fakeReturns := fake.pushWithRetryReturns
+	fake.recordInvocation("PushWithRetry", []interface{}{arg1, arg2, arg3})
+	fake.pushWithRetryMutex.Unlock()
+	if stub != nil {
+		return stub(arg1, arg2, arg3)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeGitExecutor) PushWithRetryCallCount() int {
+	fake.pushWithRetryMutex.RLock()
+	defer fake.pushWithRetryMutex.RUnlock()
+	return len(fake.pushWithRetryArgsForCall)
+}
+
+func (fake *FakeGitExecutor) PushWithRetryCalls(stub func(string, string, string) (string, error)) {
+	fake.pushWithRetryMutex.Lock()
+	defer fake.pushWithRetryMutex.Unlock()
+	fake.PushWithRetryStub = stub
+}
+
+func (fake *FakeGitExecutor) PushWithRetryArgsForCall(i int) (string, string, string) {
+	fake.pushWithRetryMutex.RLock()
+	defer fake.pushWithRetryMutex.RUnlock()
+	argsForCall := fake.pushWithRetryArgsForCall[i]
+	return argsForCall.arg1, argsForCall.arg2, argsForCall.arg3
+}
+
+func (fake *FakeGitExecutor) PushWithRetryReturns(result1 string, result2 error) {
+	fake.pushWithRetryMutex.Lock()
+	defer fake.pushWithRetryMutex.Unlock()
+	fake.PushWithRetryStub = nil
+	fake.pushWithRetryReturns = struct {
+		result1 string
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeGitExecutor) PushWithRetryReturnsOnCall(i int, result1 string, result2 error) {
+	fake.pushWithRetryMutex.Lock()
+	defer fake.pushWithRetryMutex.Unlock()
+	fake.PushWithRetryStub = nil
+	if fake.pushWithRetryReturnsOnCall == nil {
+		fake.pushWithRetryReturnsOnCall = make(map[int]struct {
+			result1 string
+			result2 error
+		})
+	}
+	fake.pushWithRetryReturnsOnCall[i] = struct {
+		result1 string
+		result2 error
+	}{result1, result2}
+}
+
 func (fake *FakeGitExecutor) RemoveDirectory(arg1 string) error {
 	fake.removeDirectoryMutex.Lock()
 	ret, specificReturn := fake.removeDirectoryReturnsOnCall[len(fake.removeDirectoryArgsForCall)]
@@ -683,24 +847,6 @@ func (fake *FakeGitExecutor) RootReturnsOnCall(i int, result1 string) {
 func (fake *FakeGitExecutor) Invocations() map[string][][]interface{} {
 	fake.invocationsMutex.RLock()
 	defer fake.invocationsMutex.RUnlock()
-	fake.addMutex.RLock()
-	defer fake.addMutex.RUnlock()
-	fake.checkoutMutex.RLock()
-	defer fake.checkoutMutex.RUnlock()
-	fake.cloneMutex.RLock()
-	defer fake.cloneMutex.RUnlock()
-	fake.commitAndPushMutex.RLock()
-	defer fake.commitAndPushMutex.RUnlock()
-	fake.hasChangesMutex.RLock()
-	defer fake.hasChangesMutex.RUnlock()
-	fake.pushMutex.RLock()
-	defer fake.pushMutex.RUnlock()
-	fake.removeDirectoryMutex.RLock()
-	defer fake.removeDirectoryMutex.RUnlock()
-	fake.removeFileMutex.RLock()
-	defer fake.removeFileMutex.RUnlock()
-	fake.rootMutex.RLock()
-	defer fake.rootMutex.RUnlock()
 	copiedInvocations := map[string][][]interface{}{}
 	for key, value := range fake.invocations {
 		copiedInvocations[key] = value

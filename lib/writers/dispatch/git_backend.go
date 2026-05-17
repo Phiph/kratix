@@ -75,24 +75,17 @@ func (g *GitBackend) Close() error {
 	return nil
 }
 
-// ApplyBatch resets the worktree, then for each intent calls
-// GitWriter.UpdateFiles (which produces one commit per intent + a push).
-// One Reset per batch cleans any leftover state. Note: under the current
-// GitWriter, each UpdateFiles call performs its own push, so an N-intent
-// batch causes N pushes — still a meaningful reduction over the prior
-// per-reconcile push storm. A future GitWriter "stage-without-push" mode
-// would collapse this to one push per batch (see spec §5.1).
+// ApplyBatch resets the worktree, stages and commits each intent locally,
+// then pushes once at the end. This collapses N pushes into 1 per batch.
 //
 // Failure attribution:
-//   - ErrPathOutsideRepo (bad workload path): per-intent quarantine; the
-//     rest of the batch keeps applying because the path was rejected
-//     before any git state was mutated for this intent.
-//   - Any other UpdateFiles error: shared-state failure (the local repo
-//     is now in an indeterminate state). Mark this intent AND all
-//     remaining intents with ErrBatchFailed; controllers requeue from
-//     CR state. Intents processed BEFORE the failure may already have
-//     pushed; their PerIntent entries remain nil. This matches what
-//     actually happened on the remote.
+//   - ErrPathOutsideRepo (bad workload path): per-intent quarantine; no git
+//     state was mutated so the rest of the batch continues.
+//   - Any other StageAndCommit error: shared-state failure (local repo is in
+//     an indeterminate state). Mark this intent AND all remaining intents with
+//     ErrBatchFailed; controllers requeue from CR state.
+//   - FlushPush failure: all intents in the batch that were staged are marked
+//     ErrBatchFailed; controllers requeue and will retry.
 func (g *GitBackend) ApplyBatch(_ context.Context, batch []ResolvedIntent) BatchResult {
 	res := BatchResult{
 		PerIntent:          make(map[string]error, len(batch)),
@@ -107,9 +100,12 @@ func (g *GitBackend) ApplyBatch(_ context.Context, batch []ResolvedIntent) Batch
 		return res
 	}
 
-	var lastSHA string
+	// Track which intents were successfully staged so we can attribute a
+	// FlushPush failure back to them.
+	staged := make([]ResolvedIntent, 0, len(batch))
+
 	for i, ri := range batch {
-		sha, err := g.writer.UpdateFiles(ri.SubDir, ri.WorkPlacement, ri.Writes.ToCreate, ri.Writes.ToDelete)
+		_, err := g.writer.StageAndCommit(ri.SubDir, ri.WorkPlacement, ri.Writes.ToCreate, ri.Writes.ToDelete)
 		if err != nil {
 			if errors.Is(err, writers.ErrPathOutsideRepo) {
 				res.PerIntent[ri.Key] = err
@@ -120,19 +116,28 @@ func (g *GitBackend) ApplyBatch(_ context.Context, batch []ResolvedIntent) Batch
 			for j := i + 1; j < len(batch); j++ {
 				res.PerIntent[batch[j].Key] = shared
 			}
-			break
+			return res
 		}
 		res.PerIntent[ri.Key] = nil
-		// sha may be "" when GitWriter.commitAndPush short-circuited on
-		// HasChanges=false (the local worktree already matches the remote
-		// for this intent). Record what actually happened: empty means
-		// "no commit produced for this intent".
-		res.PerIntentVersionID[ri.Key] = sha
-		if sha != "" {
-			lastSHA = sha
-		}
+		staged = append(staged, ri)
 	}
 
-	res.VersionID = lastSHA
+	if len(staged) == 0 {
+		return res
+	}
+
+	sha, err := g.writer.FlushPush()
+	if err != nil {
+		shared := fmt.Errorf("%w: flush push: %w", ErrBatchFailed, err)
+		for _, ri := range staged {
+			res.PerIntent[ri.Key] = shared
+		}
+		return res
+	}
+
+	res.VersionID = sha
+	for _, ri := range staged {
+		res.PerIntentVersionID[ri.Key] = sha
+	}
 	return res
 }

@@ -87,8 +87,6 @@ func (fake *FakeBatchFileRemover) RemoveFilesReturnsOnCall(i int, result1 error)
 func (fake *FakeBatchFileRemover) Invocations() map[string][][]interface{} {
 	fake.invocationsMutex.RLock()
 	defer fake.invocationsMutex.RUnlock()
-	fake.removeFilesMutex.RLock()
-	defer fake.removeFilesMutex.RUnlock()
 	copiedInvocations := map[string][][]interface{}{}
 	for key, value := range fake.invocations {
 		copiedInvocations[key] = value

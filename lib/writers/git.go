@@ -37,8 +37,10 @@ type gitAuthor struct {
 type GitExecutor interface {
 	Add(files ...string) (string, error)
 	Clone(branch string) (repoDir string, err error)
+	Commit(branch, message, author, email string) (string, error)
 	CommitAndPush(branch, message, author, email string) (string, error)
 	Push(branch string, force bool) (string, error)
+	PushWithRetry(branch, author, email string) (string, error)
 	Root() string
 	HasChanges() (bool, error)
 	Checkout(revision string) (string, error)
@@ -103,6 +105,76 @@ func NewGitWriter(logger logr.Logger, stateStoreSpec v1alpha1.GitStateStoreSpec,
 
 func (g *GitWriter) UpdateFiles(subDir string, workPlacementName string, workloadsToCreate []v1alpha1.Workload, workloadsToDelete []string) (string, error) {
 	return g.update(subDir, workPlacementName, workloadsToCreate, workloadsToDelete)
+}
+
+// StageAndCommit writes and stages workloads then commits locally without pushing.
+// Returns the commit SHA, or "" if there were no changes to commit.
+// Call FlushPush once after all StageAndCommit calls in a batch to push everything.
+func (g *GitWriter) StageAndCommit(subDir, workPlacementName string, workloadsToCreate []v1alpha1.Workload, workloadsToDelete []string) (string, error) {
+	if len(workloadsToCreate) == 0 && len(workloadsToDelete) == 0 && subDir == "" {
+		return "", nil
+	}
+
+	localDir := g.Runner.Root()
+	dirInGitRepo := filepath.Join(g.Runner.Root(), g.Path, subDir)
+	logger := g.Log.WithValues("dir", dirInGitRepo, "branch", g.GitServer.Branch)
+
+	if err := g.deleteExistingFiles(subDir != "", dirInGitRepo, workloadsToDelete, logger); err != nil {
+		return "", err
+	}
+
+	filesToAdd := make([]string, 0, len(workloadsToCreate))
+	for _, file := range workloadsToCreate {
+		absoluteFilePath := filepath.Join(dirInGitRepo, file.Filepath)
+		if !strings.HasPrefix(absoluteFilePath, localDir) {
+			logging.Warn(logger, "path of file to write is not located within the git repository",
+				"absolutePath", absoluteFilePath, "tmpDir", localDir)
+			return "", fmt.Errorf("%w: %s", ErrPathOutsideRepo, file.Filepath)
+		}
+		if err := os.MkdirAll(filepath.Dir(absoluteFilePath), 0700); err != nil {
+			logging.Error(logger, err, "could not generate local directories")
+			return "", err
+		}
+		if err := os.WriteFile(absoluteFilePath, []byte(file.Content), 0644); err != nil {
+			logging.Error(logger, err, "could not write to file")
+			return "", err
+		}
+		filesToAdd = append(filesToAdd, absoluteFilePath)
+	}
+
+	if len(filesToAdd) > 0 {
+		if _, err := g.Runner.Add(filesToAdd...); err != nil {
+			logging.Error(logger, err, "could not add files to worktree")
+			return "", err
+		}
+	}
+
+	hasChanged, err := g.Runner.HasChanges()
+	if err != nil {
+		logging.Error(logger, err, "could not check local changes")
+		return "", err
+	}
+	if !hasChanged {
+		return "", nil
+	}
+
+	action := "Delete"
+	if len(workloadsToCreate) > 0 {
+		action = "Update"
+	}
+	commitMsg := fmt.Sprintf("%s from: %s", action, workPlacementName)
+	return g.Runner.Commit(g.GitServer.Branch, commitMsg, g.Author.Name, g.Author.Email)
+}
+
+// FlushPush pushes all local commits that have accumulated via StageAndCommit to the remote.
+// Returns the HEAD SHA after a successful push.
+func (g *GitWriter) FlushPush() (string, error) {
+	sha, err := g.Runner.PushWithRetry(g.GitServer.Branch, g.Author.Name, g.Author.Email)
+	if err != nil {
+		logging.Error(g.Log, err, "could not push changes")
+		return "", err
+	}
+	return sha, nil
 }
 
 func (g *GitWriter) update(subDir, workPlacementName string, workloadsToCreate []v1alpha1.Workload, workloadsToDelete []string) (string, error) {

@@ -416,10 +416,10 @@ func (m *nativeGitClient) Push(branch string, force bool) (string, error) {
 	return "", nil
 }
 
-// CommitAndPush commits and pushes changes to the target branch.
-func (m *nativeGitClient) CommitAndPush(branch, message, author string, email string) (string, error) {
+// Commit commits staged changes to the local repository without pushing.
+// Returns the commit SHA, or ErrNothingToCommit if there is nothing to commit.
+func (m *nativeGitClient) Commit(branch, message, author, email string) (string, error) {
 	ctx := context.Background()
-
 	authorId := fmt.Sprintf("%s <%s>", author, email)
 	out, err := m.runCmd(ctx,
 		"-c", fmt.Sprintf("user.name=%s", author),
@@ -434,6 +434,17 @@ func (m *nativeGitClient) CommitAndPush(branch, message, author string, email st
 		}
 		return out, fmt.Errorf("failed to commit: %w", err)
 	}
+	sha, err := m.runCmd(ctx, "rev-parse", "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("failed to get commit SHA: %w", err)
+	}
+	return strings.TrimSpace(sha), nil
+}
+
+// PushWithRetry pushes local commits to the remote, rebasing on non-fast-forward
+// errors and retrying up to maxPushAttempts times. Returns the HEAD SHA after push.
+func (m *nativeGitClient) PushWithRetry(branch, author, email string) (string, error) {
+	ctx := context.Background()
 
 	pushArgs := []string{"push", "origin"}
 	if branch == "" {
@@ -442,6 +453,7 @@ func (m *nativeGitClient) CommitAndPush(branch, message, author string, email st
 		pushArgs = append(pushArgs, branch)
 	}
 
+	var err error
 	for attempt := 1; attempt <= maxPushAttempts; attempt++ {
 		err = m.runCredentialedCmd(ctx, pushArgs...)
 		if err == nil {
@@ -462,19 +474,27 @@ func (m *nativeGitClient) CommitAndPush(branch, message, author string, email st
 		if branch != "" {
 			rebaseArgs = append(rebaseArgs, branch)
 		}
-
-		err = m.runCredentialedCmd(ctx, rebaseArgs...)
-		if err != nil {
+		if err = m.runCredentialedCmd(ctx, rebaseArgs...); err != nil {
 			return "", fmt.Errorf("failed to rebase local changes onto latest remote state: %w", err)
 		}
 	}
 
-	commitSha, err := m.runCmd(ctx, "rev-parse", "HEAD")
+	sha, err := m.runCmd(ctx, "rev-parse", "HEAD")
 	if err != nil {
-		return "", fmt.Errorf("failed to push: %w", err)
+		return "", fmt.Errorf("failed to get HEAD SHA after push: %w", err)
 	}
+	return strings.TrimSpace(sha), nil
+}
 
-	return commitSha, nil
+// CommitAndPush commits and pushes changes to the target branch.
+func (m *nativeGitClient) CommitAndPush(branch, message, author string, email string) (string, error) {
+	if _, err := m.Commit(branch, message, author, email); err != nil {
+		if errors.Is(err, ErrNothingToCommit) {
+			return err.Error(), ErrNothingToCommit
+		}
+		return "", err
+	}
+	return m.PushWithRetry(branch, author, email)
 }
 
 // IsHTTPSURL returns true if supplied URL is HTTPS URL
