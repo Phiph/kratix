@@ -72,7 +72,56 @@ func (g *GitBackend) Close() error {
 	return nil
 }
 
-// ApplyBatch is implemented in Task 22.
+// ApplyBatch resets the worktree, then for each intent calls
+// GitWriter.UpdateFiles (which produces one commit per intent + a push).
+// One Reset per batch cleans any leftover state. Note: under the current
+// GitWriter, each UpdateFiles call performs its own push, so an N-intent
+// batch causes N pushes — still a meaningful reduction over the prior
+// per-reconcile push storm. A future GitWriter "stage-without-push" mode
+// would collapse this to one push per batch (see spec §5.1).
+//
+// Failure attribution:
+//   - ErrPathOutsideRepo (bad workload path): per-intent quarantine; the
+//     rest of the batch keeps applying because the path was rejected
+//     before any git state was mutated for this intent.
+//   - Any other UpdateFiles error: shared-state failure (the local repo
+//     is now in an indeterminate state). Mark this intent AND all
+//     remaining intents with ErrBatchFailed; controllers requeue from
+//     CR state. Intents processed BEFORE the failure may already have
+//     pushed; their PerIntent entries remain nil. This matches what
+//     actually happened on the remote.
 func (g *GitBackend) ApplyBatch(_ context.Context, batch []ResolvedIntent) BatchResult {
-	return BatchResult{}
+	res := BatchResult{PerIntent: make(map[string]error, len(batch))}
+
+	if err := g.writer.Reset(); err != nil {
+		err = fmt.Errorf("git backend: reset: %w", err)
+		for _, ri := range batch {
+			res.PerIntent[ri.Key] = err
+		}
+		return res
+	}
+
+	var lastSHA string
+	for i, ri := range batch {
+		sha, err := g.writer.UpdateFiles(ri.SubDir, ri.WorkPlacement, ri.Writes.ToCreate, ri.Writes.ToDelete)
+		if err != nil {
+			if errors.Is(err, writers.ErrPathOutsideRepo) {
+				res.PerIntent[ri.Key] = err
+				continue
+			}
+			shared := fmt.Errorf("%w: %w", ErrBatchFailed, err)
+			res.PerIntent[ri.Key] = shared
+			for j := i + 1; j < len(batch); j++ {
+				res.PerIntent[batch[j].Key] = shared
+			}
+			break
+		}
+		res.PerIntent[ri.Key] = nil
+		if sha != "" {
+			lastSHA = sha
+		}
+	}
+
+	res.VersionID = lastSHA
+	return res
 }

@@ -72,6 +72,32 @@ var _ = Describe("GitBackend integration", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(got).NotTo(HaveKey("nope.yaml"))
 	})
+
+	It("applies a single-intent batch: one commit, one push, expected file in bare repo", func() {
+		b, err := dispatch.NewGitBackend(logr.Discard(), dest, spec, creds)
+		Expect(err).NotTo(HaveOccurred())
+		defer b.Close()
+
+		res := b.ApplyBatch(context.Background(), []dispatch.ResolvedIntent{{
+			Key:           "wp-a|sub",
+			WorkPlacement: "wp-a",
+			SubDir:        "sub",
+			Writes: dispatch.Writes{
+				ToCreate: []v1alpha1.Workload{{Filepath: "a.yaml", Content: "a-content"}},
+			},
+		}})
+		Expect(res.PerIntent["wp-a|sub"]).NotTo(HaveOccurred())
+		Expect(res.VersionID).NotTo(BeEmpty())
+
+		// Verify by cloning the bare repo to a check-out dir.
+		// The repo layout is <stateStore.Path>/<dest.Path>/<subDir>/<filepath>.
+		// Both spec.Path and dest.Path are "p", so the file lives at p/p/sub/a.yaml.
+		checkout := GinkgoT().TempDir()
+		Expect(exec.Command("git", "clone", "-b", "main", bareRepo, checkout).Run()).To(Succeed())
+		body, err := os.ReadFile(filepath.Join(checkout, "p", "p", "sub", "a.yaml"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(string(body)).To(Equal("a-content"))
+	})
 })
 
 func runGit(dir string, args ...string) {
