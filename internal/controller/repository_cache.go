@@ -45,13 +45,12 @@ func (c *repositoryCache) InitRepository(logger logr.Logger, stateStore StateSto
 
 	var repo *Repository
 
-	kind := stateStore.GetObjectKind().GroupVersionKind().Kind
 	name := stateStore.GetName()
 	secretVersion := secret.ResourceVersion
 	var err *StateStoreError
-	switch kind {
+	switch stateStore.(type) {
 
-	case "GitStateStore":
+	case *v1alpha1.GitStateStore:
 		if repository, ok := c.gitRepositoryCache[name]; ok {
 			if repository.SecretVersion == secretVersion {
 				return repository, nil
@@ -66,7 +65,7 @@ func (c *repositoryCache) InitRepository(logger logr.Logger, stateStore StateSto
 		}
 		c.gitRepositoryCache[name] = repo
 
-	case "BucketStateStore":
+	case *v1alpha1.BucketStateStore:
 		if repository, ok := c.s3RepositoryCache[name]; ok {
 			if repository.SecretVersion == secretVersion {
 				return repository, nil
@@ -81,7 +80,7 @@ func (c *repositoryCache) InitRepository(logger logr.Logger, stateStore StateSto
 		c.s3RepositoryCache[name] = repo
 
 	default:
-		return nil, NewInitialiseWriterError(fmt.Errorf("unknown state store type: %s", kind))
+		return nil, NewInitialiseWriterError(fmt.Errorf("unknown state store type: %T", stateStore))
 	}
 	return repo, nil
 }
@@ -160,26 +159,25 @@ func (c *repositoryCache) Cleanup(stateStore StateStore) error {
 	c.Lock()
 	defer c.Unlock()
 
-	kind := stateStore.GetObjectKind().GroupVersionKind().Kind
 	name := stateStore.GetName()
 
 	var repo *Repository
 	var found bool
 
-	switch kind {
-	case "GitStateStore":
+	switch stateStore.(type) {
+	case *v1alpha1.GitStateStore:
 		if repo, found = c.gitRepositoryCache[name]; !found {
 			return nil
 		}
 		delete(c.gitRepositoryCache, name)
 		return os.RemoveAll(repo.Path)
-	case "BucketStateStore":
+	case *v1alpha1.BucketStateStore:
 		if _, found = c.s3RepositoryCache[name]; !found {
 			return nil
 		}
 		delete(c.s3RepositoryCache, name)
 		return nil
 	default:
-		return fmt.Errorf("unknown state store type: %s", kind)
+		return fmt.Errorf("unknown state store type: %T", stateStore)
 	}
 }
