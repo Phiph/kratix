@@ -432,6 +432,14 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+
+	setupLog.Info("shutting down dispatcher")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := dispatcher.Shutdown(shutdownCtx); err != nil {
+		setupLog.Error(err, "dispatcher shutdown did not complete cleanly")
+	}
+
 	setupLog.Info("shutting down")
 	os.Exit(0)
 }
