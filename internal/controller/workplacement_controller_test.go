@@ -514,6 +514,38 @@ files:
 					Expect(writes.ToDelete).To(BeEmpty())
 				})
 			})
+
+			When("deleting a work placement", func() {
+				BeforeEach(func() {
+					result, err := t.reconcileUntilCompletion(reconciler, &workPlacement)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(result).To(Equal(ctrl.Result{}))
+				})
+
+				It("submits a purge intent scoped to the work placement's SubDir", func() {
+					submitsBeforeDelete := fakeDispatcher.SubmitCallCount()
+
+					Expect(fakeK8sClient.Delete(ctx, &workPlacement)).To(Succeed())
+					result, err := t.reconcileUntilCompletion(reconciler, &workPlacement)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(result).To(Equal(ctrl.Result{}))
+
+					submits := collectSubmits()
+					Expect(len(submits)).To(BeNumerically(">=", submitsBeforeDelete+1))
+
+					// The purge intent uses the same SubDir as the create path so
+					// the writer's "list and delete prefix" branch fires. The
+					// previous bug set SubDir="" and put the dir in ToDelete,
+					// which the S3 writer silently skipped as NoSuchKey.
+					purgeCall := submits[submitsBeforeDelete]
+					Expect(purgeCall.intent.WorkPlacement).To(Equal(workPlacement.Name))
+					Expect(purgeCall.intent.SubDir).To(ContainSubstring("test-path/resources/default/test-promise/test-resource"))
+					Expect(purgeCall.intent.SubDir).To(HaveSuffix("/"))
+					writes := decidedWrites(purgeCall.intent, map[string][]byte{})
+					Expect(writes.ToCreate).To(BeEmpty())
+					Expect(writes.ToDelete).To(BeEmpty())
+				})
+			})
 		})
 
 		When("the destination has filepath mode of none", func() {

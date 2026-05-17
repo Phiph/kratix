@@ -653,8 +653,24 @@ func (w *workPlacementReconcileContext) deleteWorkPlacement(destKey dispatch.Des
 
 		case v1alpha1.FilepathModeNestedByMetadata:
 			logging.Trace(w.logger, "handling file path mode nestedByMetadata")
+			// The writer purges the entire SubDir prefix when ToCreate is empty.
+			// Use the same SubDir as the create path so dedup keys line up.
 			dir := getDir(w.destination.Spec.Path, *w.workPlacement) + "/"
-			workloadsToDelete = append(workloadsToDelete, dir)
+			purgeIntent := dispatch.Intent{
+				WorkPlacement: w.workPlacement.Name,
+				SubDir:        dir,
+				Decide: func(_ map[string][]byte) (dispatch.Writes, error) {
+					return dispatch.Writes{}, nil
+				},
+			}
+			_, requeue, err := w.submit(destKey, purgeIntent)
+			if err != nil {
+				w.logAndRecordError(err, "FailedDeleteFilesFromRepository", "failed to delete files from repository")
+				return defaultRequeue, nil
+			}
+			if requeue.RequeueAfter > 0 {
+				return requeue, nil
+			}
 
 		case v1alpha1.FilepathModeNone:
 			logging.Trace(w.logger, "handling file path mode none")
