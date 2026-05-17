@@ -94,7 +94,10 @@ func (g *GitBackend) Close() error {
 //     pushed; their PerIntent entries remain nil. This matches what
 //     actually happened on the remote.
 func (g *GitBackend) ApplyBatch(_ context.Context, batch []ResolvedIntent) BatchResult {
-	res := BatchResult{PerIntent: make(map[string]error, len(batch))}
+	res := BatchResult{
+		PerIntent:          make(map[string]error, len(batch)),
+		PerIntentVersionID: make(map[string]string, len(batch)),
+	}
 
 	if err := g.writer.Reset(); err != nil {
 		wrapped := fmt.Errorf("%w: reset: %w", ErrBatchFailed, err)
@@ -120,6 +123,11 @@ func (g *GitBackend) ApplyBatch(_ context.Context, batch []ResolvedIntent) Batch
 			break
 		}
 		res.PerIntent[ri.Key] = nil
+		// sha may be "" when GitWriter.commitAndPush short-circuited on
+		// HasChanges=false (the local worktree already matches the remote
+		// for this intent). Record what actually happened: empty means
+		// "no commit produced for this intent".
+		res.PerIntentVersionID[ri.Key] = sha
 		if sha != "" {
 			lastSHA = sha
 		}

@@ -242,8 +242,10 @@ func (w *Worker) fireBatch(pending []pendingIntent) {
 		owner := owners[i]
 		if errVal, ok := res.PerIntent[ri.Key]; ok && errVal != nil {
 			owner.resultCh <- SubmitResult{Err: errVal}
-		} else {
-			owner.resultCh <- SubmitResult{Result: Result{VersionID: res.VersionID}}
+			continue
+		}
+		owner.resultCh <- SubmitResult{
+			Result: Result{VersionID: res.PerIntentVersionID[ri.Key]},
 		}
 	}
 }

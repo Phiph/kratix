@@ -47,10 +47,21 @@ type ResolvedIntent struct {
 
 // BatchResult is what Backend.ApplyBatch returns.
 type BatchResult struct {
-	// VersionID for the batch (git HEAD SHA, S3 composite). Empty on shared
-	// failure.
+	// VersionID is the batch's terminal version (git HEAD SHA after the
+	// final push, S3 composite). Provided as a coarse signal for the worker
+	// or for logging; individual callers should use PerIntentVersionID
+	// for the version that corresponds to their specific intent. Empty on
+	// shared failure.
 	VersionID string
 
 	// PerIntent maps the ResolvedIntent.Key to its outcome. nil = success.
 	PerIntent map[string]error
+
+	// PerIntentVersionID maps the ResolvedIntent.Key to the backend version
+	// produced by that specific intent (git commit SHA, S3 object version).
+	// May be empty when no version was produced (e.g. HasChanges=false
+	// short-circuit for git). Callers must NOT fall back to VersionID when
+	// this is empty for their key — empty means "nothing committed for me",
+	// not "use the batch SHA".
+	PerIntentVersionID map[string]string
 }

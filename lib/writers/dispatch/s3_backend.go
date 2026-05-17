@@ -83,10 +83,16 @@ func (s *S3Backend) ApplyBatch(_ context.Context, batch []ResolvedIntent) BatchR
 	//   - call BucketExists at most once per batch (or remove entirely if the
 	//     check is purely advisory)
 	// See docs/superpowers/specs/2026-05-16-write-queue-design.md §5.2.
-	res := BatchResult{PerIntent: make(map[string]error, len(batch))}
+	res := BatchResult{
+		PerIntent:          make(map[string]error, len(batch)),
+		PerIntentVersionID: make(map[string]string, len(batch)),
+	}
 	for _, ri := range batch {
-		_, err := s.writer.UpdateFiles(ri.SubDir, ri.WorkPlacement, ri.Writes.ToCreate, ri.Writes.ToDelete)
+		vID, err := s.writer.UpdateFiles(ri.SubDir, ri.WorkPlacement, ri.Writes.ToCreate, ri.Writes.ToDelete)
 		res.PerIntent[ri.Key] = err
+		if err == nil {
+			res.PerIntentVersionID[ri.Key] = vID
+		}
 	}
 	return res
 }

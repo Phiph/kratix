@@ -28,8 +28,30 @@ var _ = Describe("Dispatcher.Submit", func() {
 		fakeClock = clocktesting.NewFakeClock(time.Unix(0, 0))
 		gitFake = &dispatchfakes.FakeBackend{}
 		s3Fake = &dispatchfakes.FakeBackend{}
-		gitFake.ApplyBatchReturns(dispatch.BatchResult{VersionID: "git-sha"})
-		s3Fake.ApplyBatchReturns(dispatch.BatchResult{VersionID: "s3-id"})
+		gitFake.ApplyBatchStub = func(_ context.Context, batch []dispatch.ResolvedIntent) dispatch.BatchResult {
+			res := dispatch.BatchResult{
+				VersionID:          "git-sha",
+				PerIntent:          map[string]error{},
+				PerIntentVersionID: map[string]string{},
+			}
+			for _, ri := range batch {
+				res.PerIntent[ri.Key] = nil
+				res.PerIntentVersionID[ri.Key] = "git-sha"
+			}
+			return res
+		}
+		s3Fake.ApplyBatchStub = func(_ context.Context, batch []dispatch.ResolvedIntent) dispatch.BatchResult {
+			res := dispatch.BatchResult{
+				VersionID:          "s3-id",
+				PerIntent:          map[string]error{},
+				PerIntentVersionID: map[string]string{},
+			}
+			for _, ri := range batch {
+				res.PerIntent[ri.Key] = nil
+				res.PerIntentVersionID[ri.Key] = "s3-id"
+			}
+			return res
+		}
 		gitCallCount = 0
 
 		gitDest = dispatch.DestinationKey{StateStoreKind: "GitStateStore", StateStoreName: "g", Branch: "main", Path: "p"}

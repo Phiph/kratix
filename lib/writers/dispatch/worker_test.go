@@ -40,10 +40,18 @@ var _ = Describe("Worker", func() {
 			Logger:       logr.Discard(),
 		}
 		fakeBackend.ReadReturns(map[string][]byte{}, nil)
-		fakeBackend.ApplyBatchReturns(dispatch.BatchResult{
-			VersionID: "sha-1",
-			PerIntent: map[string]error{},
-		})
+		fakeBackend.ApplyBatchStub = func(_ context.Context, batch []dispatch.ResolvedIntent) dispatch.BatchResult {
+			res := dispatch.BatchResult{
+				VersionID:          "sha-1",
+				PerIntent:          map[string]error{},
+				PerIntentVersionID: map[string]string{},
+			}
+			for _, ri := range batch {
+				res.PerIntent[ri.Key] = nil
+				res.PerIntentVersionID[ri.Key] = "sha-1"
+			}
+			return res
+		}
 	})
 
 	It("fires a batch after the configured window when one intent is submitted", func() {
@@ -239,6 +247,9 @@ var _ = Describe("Worker", func() {
 			PerIntent: map[string]error{
 				"wp-a|sub": nil,
 				"wp-b|sub": errors.New("just b broke"),
+			},
+			PerIntentVersionID: map[string]string{
+				"wp-a|sub": "sha-2",
 			},
 		})
 
