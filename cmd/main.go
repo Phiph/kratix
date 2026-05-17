@@ -380,11 +380,11 @@ func main() {
 		os.Exit(1)
 	}
 	if err = (&controller.WorkPlacementReconciler{
-		Client:          mgr.GetClient(),
-		Log:             ctrl.Log.WithName("controllers").WithName("WorkPlacementController"),
-		VersionCache:    make(map[string]string),
-		RepositoryCache: repositoryCache,
-		EventRecorder:   mgr.GetEventRecorderFor("WorkPlacementController"),
+		Client:        mgr.GetClient(),
+		Log:           ctrl.Log.WithName("controllers").WithName("WorkPlacementController"),
+		VersionCache:  make(map[string]string),
+		Dispatcher:    dispatcher,
+		EventRecorder: mgr.GetEventRecorderFor("WorkPlacementController"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "WorkPlacement")
 		os.Exit(1)

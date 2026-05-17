@@ -34,6 +34,12 @@ var (
 
 	// ErrBatchFailed wraps a backend-layer failure that affected the entire batch.
 	ErrBatchFailed = errors.New("batch apply failed")
+
+	// ErrDestinationNotRegistered means a Submit/Validate was attempted for a
+	// destination that was never registered via RegisterGitDestination or
+	// RegisterS3Destination. Transient; caller should retry after the
+	// destination's state-store reconcile catches up.
+	ErrDestinationNotRegistered = errors.New("destination not registered")
 )
 
 // DestinationKey uniquely identifies a write target. Same key → same worker.
@@ -272,7 +278,7 @@ func (d *dispatcher) constructBackend(dest DestinationKey) (Backend, error) {
 func (d *dispatcher) constructBackendLocked(dest DestinationKey) (Backend, error) {
 	spec, ok := d.specs[dest]
 	if !ok {
-		return nil, fmt.Errorf("destination not registered: %+v", dest)
+		return nil, fmt.Errorf("%w: %+v", ErrDestinationNotRegistered, dest)
 	}
 	switch {
 	case spec.gitSpec != nil:

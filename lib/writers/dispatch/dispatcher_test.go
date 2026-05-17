@@ -90,6 +90,8 @@ var _ = Describe("Dispatcher.Submit", func() {
 			Decide: func(_ map[string][]byte) (dispatch.Writes, error) { return dispatch.Writes{}, nil },
 		})
 		Expect(err).To(HaveOccurred())
+		Expect(errors.Is(err, dispatch.ErrDestinationNotRegistered)).To(BeTrue(),
+			"expected ErrDestinationNotRegistered, got %v", err)
 	})
 
 	It("routes intents to the correct worker per destination", func() {

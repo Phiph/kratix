@@ -29,7 +29,7 @@ import (
 	"github.com/syntasso/kratix/internal/logging"
 	"github.com/syntasso/kratix/internal/telemetry"
 	"github.com/syntasso/kratix/lib/compression"
-	"github.com/syntasso/kratix/lib/writers"
+	"github.com/syntasso/kratix/lib/writers/dispatch"
 	"gopkg.in/yaml.v2"
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -65,7 +65,7 @@ type WorkPlacementReconciler struct {
 	VersionCache  map[string]string
 	EventRecorder record.EventRecorder
 
-	RepositoryCache RepositoryCache
+	Dispatcher dispatch.Dispatcher
 }
 
 type workPlacementReconcileContext struct {
@@ -77,9 +77,9 @@ type workPlacementReconcileContext struct {
 	client        client.Client
 	eventRecorder record.EventRecorder
 
-	workPlacement   *v1alpha1.WorkPlacement
-	destination     *v1alpha1.Destination
-	repositoryCache RepositoryCache
+	workPlacement *v1alpha1.WorkPlacement
+	destination   *v1alpha1.Destination
+	dispatcher    dispatch.Dispatcher
 
 	versionCache map[string]string
 }
@@ -134,15 +134,15 @@ func (r *WorkPlacementReconciler) newReconcileContext(ctx context.Context, logge
 	}
 
 	return &workPlacementReconcileContext{
-		ctx:             ctx,
-		controller:      "workplacement-controller",
-		logger:          logger.WithValues("generation", workPlacement.GetGeneration()),
-		client:          r.Client,
-		eventRecorder:   r.EventRecorder,
-		workPlacement:   workPlacement,
-		destination:     dest,
-		repositoryCache: r.RepositoryCache,
-		versionCache:    r.VersionCache,
+		ctx:           ctx,
+		controller:    "workplacement-controller",
+		logger:        logger.WithValues("generation", workPlacement.GetGeneration()),
+		client:        r.Client,
+		eventRecorder: r.EventRecorder,
+		workPlacement: workPlacement,
+		destination:   dest,
+		dispatcher:    r.Dispatcher,
+		versionCache:  r.VersionCache,
 	}, nil
 }
 
@@ -167,27 +167,14 @@ func (w *workPlacementReconcileContext) reconcileWithSpanAttributes() (result ct
 }
 
 func (w *workPlacementReconcileContext) Reconcile() (result ctrl.Result, retErr error) {
-	repo, err := w.repositoryCache.GetRepositoryByTypeAndName(
-		w.destination.Spec.StateStoreRef.Kind,
-		w.destination.Spec.StateStoreRef.Name,
-	)
+	destKey, err := w.destKey()
 	if err != nil {
-		if errors.Is(err, ErrCacheMiss) {
-			logging.Debug(w.logger, "repository not initialised, requeuing")
-			return defaultRequeue, nil
-		}
-		return ctrl.Result{}, err
-	}
-
-	repo.Lock()
-	defer repo.Unlock()
-
-	if err := repo.Writer.Reset(); err != nil {
+		logging.Error(w.logger, err, "failed to resolve destination key")
 		return defaultRequeue, nil
 	}
 
 	if !w.workPlacement.DeletionTimestamp.IsZero() {
-		return w.handleDeletion(repo)
+		return w.handleDeletion(destKey)
 	}
 
 	if missingFinalizers := w.checkWorkPlacementFinalizers(); len(missingFinalizers) > 0 {
@@ -199,7 +186,7 @@ func (w *workPlacementReconcileContext) Reconcile() (result ctrl.Result, retErr 
 		return fastRequeue, nil
 	}
 
-	versionID, requeue, err := w.writeToStateStore(repo)
+	versionID, requeue, err := w.writeToStateStore(destKey)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -215,6 +202,38 @@ func (w *workPlacementReconcileContext) Reconcile() (result ctrl.Result, retErr 
 	}
 
 	return ctrl.Result{}, nil
+}
+
+// destKey resolves the destination-level DestinationKey for the work placement's
+// target destination. The Branch field is populated by looking up the referenced
+// GitStateStore (empty for BucketStateStore). Must match the key used by the
+// destination controller when it registers with the dispatcher.
+func (w *workPlacementReconcileContext) destKey() (dispatch.DestinationKey, error) {
+	ref := w.destination.Spec.StateStoreRef
+	if ref == nil {
+		return dispatch.DestinationKey{}, fmt.Errorf("destination %q has no StateStoreRef", w.destination.Name)
+	}
+	switch ref.Kind {
+	case "GitStateStore":
+		ss := &v1alpha1.GitStateStore{}
+		if err := w.client.Get(w.ctx, client.ObjectKey{Name: ref.Name}, ss); err != nil {
+			return dispatch.DestinationKey{}, fmt.Errorf("failed to get GitStateStore %q: %w", ref.Name, err)
+		}
+		return dispatch.DestinationKey{
+			StateStoreKind: "GitStateStore",
+			StateStoreName: ref.Name,
+			Branch:         ss.Spec.Branch,
+			Path:           w.destination.Spec.Path,
+		}, nil
+	case "BucketStateStore":
+		return dispatch.DestinationKey{
+			StateStoreKind: "BucketStateStore",
+			StateStoreName: ref.Name,
+			Path:           w.destination.Spec.Path,
+		}, nil
+	default:
+		return dispatch.DestinationKey{}, fmt.Errorf("unsupported state store kind %q", ref.Kind)
+	}
 }
 
 func (w *workPlacementReconcileContext) updateResourceStatus(versionID string, err error) error {
@@ -336,7 +355,7 @@ func addWorkPlacementSpanAttributes(traceCtx *reconcileTrace, promiseName string
 	)
 }
 
-func (w *workPlacementReconcileContext) handleDeletion(repo *Repository) (ctrl.Result, error) {
+func (w *workPlacementReconcileContext) handleDeletion(destKey dispatch.DestinationKey) (ctrl.Result, error) {
 	logging.Info(w.logger, "deleting workplacement")
 
 	if w.destination == nil {
@@ -348,11 +367,11 @@ func (w *workPlacementReconcileContext) handleDeletion(repo *Repository) (ctrl.R
 		return ctrl.Result{}, nil
 	}
 
-	return w.deleteWorkPlacement(repo)
+	return w.deleteWorkPlacement(destKey)
 }
 
-func (w *workPlacementReconcileContext) logAndRecordError(err error, reason, message string, args ...any) {
-	logging.Error(w.logger, err, message, args...)
+func (w *workPlacementReconcileContext) logAndRecordError(err error, reason, message string) {
+	logging.Error(w.logger, err, message)
 	w.eventRecorder.Eventf(
 		w.workPlacement,
 		v1.EventTypeWarning,
@@ -361,12 +380,9 @@ func (w *workPlacementReconcileContext) logAndRecordError(err error, reason, mes
 	)
 }
 
-func (w *workPlacementReconcileContext) generateKratixStateFile(repo *Repository, pathPrefix string) (v1alpha1.Workload, StateFile, error) {
-	oldStateFile, err := w.readKratixStateFile(repo, true)
-	if err != nil {
-		return v1alpha1.Workload{}, StateFile{}, err
-	}
-
+// buildStateFileWorkload returns the .kratix state-file workload that records
+// the current set of paths written by this WorkPlacement.
+func (w *workPlacementReconcileContext) buildStateFileWorkload(pathPrefix string) (v1alpha1.Workload, error) {
 	workloadPaths := make([]string, 0, len(w.workPlacement.Spec.Workloads))
 	for _, workload := range w.workPlacement.Spec.Workloads {
 		workloadPaths = append(workloadPaths, filepath.Join(pathPrefix, workload.Filepath))
@@ -374,38 +390,31 @@ func (w *workPlacementReconcileContext) generateKratixStateFile(repo *Repository
 	newStateFile := StateFile{Files: workloadPaths}
 	stateFileContent, marshalErr := yaml.Marshal(newStateFile)
 	if marshalErr != nil {
-		return v1alpha1.Workload{}, StateFile{}, fmt.Errorf("failed to marshal new .kratix state file: %w", marshalErr)
+		return v1alpha1.Workload{}, fmt.Errorf("failed to marshal new .kratix state file: %w", marshalErr)
 	}
-
-	kratixRelativePath := filepath.Join(pathPrefix, ".kratix", fmt.Sprintf("%s-%s.yaml", w.workPlacement.Namespace, w.workPlacement.Name))
-	stateFileWorkload := v1alpha1.Workload{
-		Filepath: kratixRelativePath,
+	return v1alpha1.Workload{
+		Filepath: w.kratixStateFilePath(),
 		Content:  string(stateFileContent),
-	}
-	return stateFileWorkload, oldStateFile, nil
+	}, nil
 }
 
 func (w *workPlacementReconcileContext) kratixStateFilePath() string {
 	return filepath.Join(w.destination.Spec.Path, fmt.Sprintf(".kratix/%s-%s.yaml", w.workPlacement.Namespace, w.workPlacement.Name))
 }
 
-func (w *workPlacementReconcileContext) readKratixStateFile(repo *Repository, ignoreNotFound bool) (StateFile, error) {
-	kratixFilePath := w.kratixStateFilePath()
-	kratixFile, err := repo.Writer.ReadFile(kratixFilePath)
-	if err != nil {
-		if ignoreNotFound && errors.Is(err, writers.ErrFileNotFound) {
-			return StateFile{}, nil
-		}
-		w.logAndRecordError(err, "FailedReadKratixStateFile", "failed to read .kratix state file", "filePath", kratixFilePath)
-		return StateFile{}, err
+// decodeStateFile parses the .kratix state-file bytes returned by the worker
+// for the configured kratixStateFilePath. Missing or empty entries are
+// treated as a zero-value StateFile.
+func (w *workPlacementReconcileContext) decodeStateFile(reads map[string][]byte) (StateFile, error) {
+	data, ok := reads[w.kratixStateFilePath()]
+	if !ok || len(data) == 0 {
+		return StateFile{}, nil
 	}
-
 	stateFile := StateFile{}
-	if err = yaml.Unmarshal(kratixFile, &stateFile); err != nil {
+	if err := yaml.Unmarshal(data, &stateFile); err != nil {
 		w.logAndRecordError(err, "FailedUnmarshalKratixStateFile", "failed to unmarshal .kratix state file")
 		return StateFile{}, err
 	}
-
 	return stateFile, nil
 }
 
@@ -488,25 +497,22 @@ func (w *workPlacementReconcileContext) combineAllWorkloads(workPlacements []v1a
 	return sb.String(), nil
 }
 
-func (w *workPlacementReconcileContext) delete(repo *Repository, workloadsToDelete []string) (ctrl.Result, error) {
-	if err := repo.Writer.DeleteFiles(w.workPlacement.Name, workloadsToDelete); err != nil {
-		w.logAndRecordError(err, "FailedDeleteFilesFromRepository", "failed to delete files from repository")
-		return defaultRequeue, nil
-	}
-
-	controllerutil.RemoveFinalizer(w.workPlacement, repoCleanupWorkPlacementFinalizer)
-	controllerutil.RemoveFinalizer(w.workPlacement, kratixFileCleanupWorkPlacementFinalizer)
-
-	if err := w.client.Update(w.ctx, w.workPlacement); err != nil {
-		if apierrors.IsConflict(err) {
-			return defaultRequeue, nil
+// submit wraps dispatcher.Submit and maps ErrDestinationNotRegistered to a
+// transient requeue (the destination's state-store reconcile has not caught
+// up yet).
+func (w *workPlacementReconcileContext) submit(destKey dispatch.DestinationKey, intent dispatch.Intent) (dispatch.Result, ctrl.Result, error) {
+	res, err := w.dispatcher.Submit(w.ctx, destKey, intent)
+	if err != nil {
+		if errors.Is(err, dispatch.ErrDestinationNotRegistered) {
+			logging.Debug(w.logger, "destination not registered with dispatcher, requeuing")
+			return dispatch.Result{}, defaultRequeue, nil
 		}
-		return ctrl.Result{}, err
+		return dispatch.Result{}, ctrl.Result{}, err
 	}
-	return ctrl.Result{}, nil
+	return res, ctrl.Result{}, nil
 }
 
-func (w *workPlacementReconcileContext) writeToStateStore(repo *Repository) (string, ctrl.Result, error) {
+func (w *workPlacementReconcileContext) writeToStateStore(destKey dispatch.DestinationKey) (string, ctrl.Result, error) {
 	metricAttrs := telemetry.WorkPlacementWriteAttributes(
 		w.workPlacement.Spec.PromiseName,
 		w.workPlacement.Spec.ResourceName,
@@ -515,7 +521,7 @@ func (w *workPlacementReconcileContext) writeToStateStore(repo *Repository) (str
 	)
 
 	logging.Debug(w.logger, "writing files to state store")
-	versionID, workloadErr := w.writeWorkloadsToStateStore(repo)
+	versionID, workloadErr := w.writeWorkloadsToStateStore(destKey)
 	if workloadErr != nil {
 		telemetry.RecordWorkPlacementWrite(w.ctx, telemetry.WorkPlacementWriteResultFailure, metricAttrs...)
 		w.logAndRecordError(workloadErr, "FailedWriteToDestination", "error writing to destination; check kubectl get destination for more info")
@@ -529,94 +535,130 @@ func (w *workPlacementReconcileContext) writeToStateStore(repo *Repository) (str
 	return versionID, ctrl.Result{}, nil
 }
 
-func (w *workPlacementReconcileContext) writeWorkloadsToStateStore(repo *Repository) (string, error) {
-	var err error
-	var workloadsToDelete []string
-	var workloadsToCreate []v1alpha1.Workload
-	dir := getDir(w.destination.Spec.Path, *w.workPlacement) + "/"
+func (w *workPlacementReconcileContext) writeWorkloadsToStateStore(destKey dispatch.DestinationKey) (string, error) {
+	intent, err := w.buildWriteIntent()
+	if err != nil {
+		return "", err
+	}
+	res, requeue, err := w.submit(destKey, intent)
+	if err != nil {
+		logging.Error(w.logger, err, "error writing resources to repository")
+		return "", err
+	}
+	if requeue.RequeueAfter > 0 {
+		// Destination not yet registered with the dispatcher; signal via
+		// empty version, no error. The caller will skip status updates by
+		// returning the requeue; we currently always submit so just return.
+		return "", nil
+	}
+	return res.VersionID, nil
+}
 
+// buildWriteIntent constructs the dispatch.Intent that captures the write
+// behaviour for the configured filepath mode. The Decide callback closes over
+// w (the reconcile context); it is invoked synchronously by the worker
+// during Submit, which blocks the reconcile goroutine until the batch
+// completes, so the closure outlives the call safely.
+func (w *workPlacementReconcileContext) buildWriteIntent() (dispatch.Intent, error) {
 	switch w.destination.GetFilepathMode() {
-
 	case v1alpha1.FilepathModeAggregatedYAML:
-		dir = ""
-		workload, err := w.getAggregatedWorkload()
-		if err != nil {
-			return "", err
-		}
-		workloadsToCreate = []v1alpha1.Workload{workload}
+		return dispatch.Intent{
+			WorkPlacement: w.workPlacement.Name,
+			SubDir:        "",
+			Decide: func(_ map[string][]byte) (dispatch.Writes, error) {
+				workload, err := w.getAggregatedWorkload()
+				if err != nil {
+					return dispatch.Writes{}, err
+				}
+				return dispatch.Writes{ToCreate: []v1alpha1.Workload{workload}}, nil
+			},
+		}, nil
 
 	case v1alpha1.FilepathModeNone:
 		pathPrefix := w.destination.Spec.Path + "/"
-		dir = ""
-		newWorkload, oldStateFile, err := w.generateKratixStateFile(repo, pathPrefix)
-		if err != nil {
-			return "", err
-		}
-		workloadsToCreate = append(workloadsToCreate, newWorkload)
-		workloadsToDelete = cleanupWorkloadsWithPrefix(oldStateFile.Files, w.workPlacement.Spec.Workloads, pathPrefix)
+		kratixPath := w.kratixStateFilePath()
+		return dispatch.Intent{
+			WorkPlacement: w.workPlacement.Name,
+			SubDir:        "",
+			Reads:         []string{kratixPath},
+			Decide: func(reads map[string][]byte) (dispatch.Writes, error) {
+				oldStateFile, err := w.decodeStateFile(reads)
+				if err != nil {
+					return dispatch.Writes{}, err
+				}
+				stateFileWorkload, err := w.buildStateFileWorkload(pathPrefix)
+				if err != nil {
+					return dispatch.Writes{}, err
+				}
+				workloadsToCreate := []v1alpha1.Workload{stateFileWorkload}
+				for _, workload := range w.workPlacement.Spec.Workloads {
+					decompressedContent, err := compression.DecompressContent([]byte(workload.Content))
+					if err != nil {
+						return dispatch.Writes{}, fmt.Errorf("unable to decompress file content: %w", err)
+					}
 
-		for _, workload := range w.workPlacement.Spec.Workloads {
-			decompressedContent, err := compression.DecompressContent([]byte(workload.Content))
-			if err != nil {
-				return "", fmt.Errorf("unable to decompress file content: %w", err)
-			}
-
-			workload.Content = string(decompressedContent)
-			workload.Filepath = filepath.Join(pathPrefix, workload.Filepath)
-			workloadsToCreate = append(workloadsToCreate, workload)
-		}
+					workload.Content = string(decompressedContent)
+					workload.Filepath = filepath.Join(pathPrefix, workload.Filepath)
+					workloadsToCreate = append(workloadsToCreate, workload)
+				}
+				workloadsToDelete := cleanupWorkloadsWithPrefix(oldStateFile.Files, w.workPlacement.Spec.Workloads, pathPrefix)
+				return dispatch.Writes{ToCreate: workloadsToCreate, ToDelete: workloadsToDelete}, nil
+			},
+		}, nil
 
 	case v1alpha1.FilepathModeNestedByMetadata:
 		logging.Trace(w.logger, "handling file path mode nestedByMetadata")
+		return dispatch.Intent{
+			WorkPlacement: w.workPlacement.Name,
+			SubDir:        getDir(w.destination.Spec.Path, *w.workPlacement) + "/",
+			Decide: func(_ map[string][]byte) (dispatch.Writes, error) {
+				workloadsToCreate := make([]v1alpha1.Workload, 0, len(w.workPlacement.Spec.Workloads))
+				for _, workload := range w.workPlacement.Spec.Workloads {
+					decompressedContent, err := compression.DecompressContent([]byte(workload.Content))
+					if err != nil {
+						return dispatch.Writes{}, fmt.Errorf("unable to decompress file content: %w", err)
+					}
 
-		for _, workload := range w.workPlacement.Spec.Workloads {
-			decompressedContent, err := compression.DecompressContent([]byte(workload.Content))
-			if err != nil {
-				return "", fmt.Errorf("unable to decompress file content: %w", err)
-			}
-
-			workload.Content = string(decompressedContent)
-			workloadsToCreate = append(workloadsToCreate, workload)
-		}
+					workload.Content = string(decompressedContent)
+					workloadsToCreate = append(workloadsToCreate, workload)
+				}
+				return dispatch.Writes{ToCreate: workloadsToCreate}, nil
+			},
+		}, nil
 
 	default:
-		return "", fmt.Errorf("unsupported file path mode: %s", w.destination.GetFilepathMode())
+		return dispatch.Intent{}, fmt.Errorf("unsupported file path mode: %s", w.destination.GetFilepathMode())
 	}
-
-	versionID, err := repo.Writer.UpdateFiles(dir, w.workPlacement.Name, workloadsToCreate, workloadsToDelete)
-	if err != nil {
-		logging.Error(w.logger, err, "error writing resources to repository")
-	}
-	return versionID, err
 }
 
-func (w *workPlacementReconcileContext) deleteWorkPlacement(repo *Repository) (ctrl.Result, error) {
+func (w *workPlacementReconcileContext) deleteWorkPlacement(destKey dispatch.DestinationKey) (ctrl.Result, error) {
 	pendingRepoCleanup := controllerutil.ContainsFinalizer(w.workPlacement, repoCleanupWorkPlacementFinalizer)
 	pendingKratixFileCleanup := controllerutil.ContainsFinalizer(w.workPlacement, kratixFileCleanupWorkPlacementFinalizer)
 
-	var dir string
 	workloadsToDelete := []string{}
 
 	if pendingRepoCleanup {
 		logging.Debug(w.logger, "deleting files from repository")
-
 		filePathMode := w.destination.GetFilepathMode()
 
 		switch filePathMode {
 
 		case v1alpha1.FilepathModeNestedByMetadata:
 			logging.Trace(w.logger, "handling file path mode nestedByMetadata")
-			dir = getDir(w.destination.Spec.Path, *w.workPlacement) + "/"
+			dir := getDir(w.destination.Spec.Path, *w.workPlacement) + "/"
 			workloadsToDelete = append(workloadsToDelete, dir)
 
 		case v1alpha1.FilepathModeNone:
 			logging.Trace(w.logger, "handling file path mode none")
-			stateFile, err := w.readKratixStateFile(repo, false)
+			capturedFiles, requeue, err := w.fetchStateFile(destKey)
 			if err != nil {
 				logging.Debug(w.logger, "failed to read .kratix state file", "error", err)
 				return defaultRequeue, nil
 			}
-			workloadsToDelete = stateFile.Files
+			if requeue.RequeueAfter > 0 {
+				return requeue, nil
+			}
+			workloadsToDelete = capturedFiles
 
 		case v1alpha1.FilepathModeAggregatedYAML:
 			logging.Trace(w.logger, "handling file path mode aggregatedYAML")
@@ -628,10 +670,20 @@ func (w *workPlacementReconcileContext) deleteWorkPlacement(repo *Repository) (c
 			workloadsToDelete = []string{workload.Filepath}
 
 			if workload.Content != "" { // there are still other workplacements for this destination
-				_, err := repo.Writer.UpdateFiles("", w.workPlacement.Name, []v1alpha1.Workload{workload}, []string{})
+				updateIntent := dispatch.Intent{
+					WorkPlacement: w.workPlacement.Name,
+					SubDir:        "",
+					Decide: func(_ map[string][]byte) (dispatch.Writes, error) {
+						return dispatch.Writes{ToCreate: []v1alpha1.Workload{workload}}, nil
+					},
+				}
+				_, requeue, err := w.submit(destKey, updateIntent)
 				if err != nil {
 					logging.Debug(w.logger, "failed to update files in repository", "error", err)
 					return defaultRequeue, nil
+				}
+				if requeue.RequeueAfter > 0 {
+					return requeue, nil
 				}
 				workloadsToDelete = []string{}
 			}
@@ -646,7 +698,68 @@ func (w *workPlacementReconcileContext) deleteWorkPlacement(repo *Repository) (c
 		workloadsToDelete = append(workloadsToDelete, w.kratixStateFilePath())
 	}
 
-	return w.delete(repo, workloadsToDelete)
+	return w.delete(destKey, workloadsToDelete)
+}
+
+// fetchStateFile submits a read-only intent with a no-op Decide and reads the
+// .kratix state-file paths from the live destination. It returns the file
+// paths the worker discovered there. Used by the deletion path to know which
+// files to remove.
+func (w *workPlacementReconcileContext) fetchStateFile(destKey dispatch.DestinationKey) ([]string, ctrl.Result, error) {
+	kratixPath := w.kratixStateFilePath()
+	var captured StateFile
+	var decodeErr error
+	intent := dispatch.Intent{
+		WorkPlacement: w.workPlacement.Name,
+		SubDir:        "",
+		Reads:         []string{kratixPath},
+		Decide: func(reads map[string][]byte) (dispatch.Writes, error) {
+			captured, decodeErr = w.decodeStateFile(reads)
+			return dispatch.Writes{}, decodeErr
+		},
+	}
+	_, requeue, err := w.submit(destKey, intent)
+	if err != nil {
+		return nil, ctrl.Result{}, err
+	}
+	if requeue.RequeueAfter > 0 {
+		return nil, requeue, nil
+	}
+	if decodeErr != nil {
+		return nil, ctrl.Result{}, decodeErr
+	}
+	return captured.Files, ctrl.Result{}, nil
+}
+
+func (w *workPlacementReconcileContext) delete(destKey dispatch.DestinationKey, workloadsToDelete []string) (ctrl.Result, error) {
+	if len(workloadsToDelete) > 0 {
+		intent := dispatch.Intent{
+			WorkPlacement: w.workPlacement.Name,
+			SubDir:        "",
+			Decide: func(_ map[string][]byte) (dispatch.Writes, error) {
+				return dispatch.Writes{ToDelete: workloadsToDelete}, nil
+			},
+		}
+		_, requeue, err := w.submit(destKey, intent)
+		if err != nil {
+			w.logAndRecordError(err, "FailedDeleteFilesFromRepository", "failed to delete files from repository")
+			return defaultRequeue, nil
+		}
+		if requeue.RequeueAfter > 0 {
+			return requeue, nil
+		}
+	}
+
+	controllerutil.RemoveFinalizer(w.workPlacement, repoCleanupWorkPlacementFinalizer)
+	controllerutil.RemoveFinalizer(w.workPlacement, kratixFileCleanupWorkPlacementFinalizer)
+
+	if err := w.client.Update(w.ctx, w.workPlacement); err != nil {
+		if apierrors.IsConflict(err) {
+			return defaultRequeue, nil
+		}
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{}, nil
 }
 
 func cleanupWorkloadsWithPrefix(oldWorkloads []string, newWorkloads []v1alpha1.Workload, pathPrefix string) []string {
