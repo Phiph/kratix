@@ -97,6 +97,30 @@ var _ = Describe("GitBackend integration", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(string(body)).To(Equal("a-content"))
 	})
+
+	It("applies a 3-intent batch and includes all files in the bare repo", func() {
+		b, err := dispatch.NewGitBackend(logr.Discard(), dest, spec, creds)
+		Expect(err).NotTo(HaveOccurred())
+		defer b.Close()
+
+		intents := []dispatch.ResolvedIntent{
+			{Key: "wp-1|sub-1", WorkPlacement: "wp-1", SubDir: "sub-1", Writes: dispatch.Writes{ToCreate: []v1alpha1.Workload{{Filepath: "1.yaml", Content: "1"}}}},
+			{Key: "wp-2|sub-2", WorkPlacement: "wp-2", SubDir: "sub-2", Writes: dispatch.Writes{ToCreate: []v1alpha1.Workload{{Filepath: "2.yaml", Content: "2"}}}},
+			{Key: "wp-3|sub-3", WorkPlacement: "wp-3", SubDir: "sub-3", Writes: dispatch.Writes{ToCreate: []v1alpha1.Workload{{Filepath: "3.yaml", Content: "3"}}}},
+		}
+		res := b.ApplyBatch(context.Background(), intents)
+		for _, ri := range intents {
+			Expect(res.PerIntent[ri.Key]).NotTo(HaveOccurred(), "intent %s should succeed", ri.Key)
+		}
+
+		checkout := GinkgoT().TempDir()
+		Expect(exec.Command("git", "clone", "-b", "main", bareRepo, checkout).Run()).To(Succeed())
+		for _, ri := range intents {
+			body, err := os.ReadFile(filepath.Join(checkout, "state", "dest", ri.SubDir, ri.Writes.ToCreate[0].Filepath))
+			Expect(err).NotTo(HaveOccurred(), "file %s should exist", ri.Writes.ToCreate[0].Filepath)
+			Expect(string(body)).To(Equal(ri.Writes.ToCreate[0].Content))
+		}
+	})
 })
 
 func runGit(dir string, args ...string) {
