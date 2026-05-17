@@ -516,7 +516,9 @@ func (w *workPlacementReconcileContext) writeToStateStore(repo *Repository) (str
 
 	telemetry.RecordWorkPlacementWrite(w.ctx, telemetry.WorkPlacementWriteResultSuccess, metricAttrs...)
 	w.setVersionID(versionID)
-	w.publishWriteEvent("WorkloadsWrittenToStateStore", versionID, nil)
+	if versionID != "" {
+		w.publishWriteEvent("WorkloadsWrittenToStateStore", versionID, nil)
+	}
 
 	return versionID, ctrl.Result{}, nil
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -129,8 +130,6 @@ func (s *Scheduler) updateWorkStatus(w *v1alpha1.Work, unscheduledWorkloadGroupI
 			Reason:  "Misplaced",
 			Message: "Misplaced",
 		}
-		s.EventRecorder.Eventf(w, nil, corev1.EventTypeWarning, scheduleSucceededConditionMismatchReason, scheduleSucceededConditionMismatchReason, "Target destination no longer matches destinationSelectors for workloadGroups: [%s] ",
-			strings.Join(misplacedWorkloadGroupIDs, ","))
 	} else { // all works are scheduled and none is misplaced
 		readyCond = metav1.Condition{
 			Type:    "Ready",
@@ -144,12 +143,20 @@ func (s *Scheduler) updateWorkStatus(w *v1alpha1.Work, unscheduledWorkloadGroupI
 			Reason:  "AllWorkplacementsScheduled",
 			Message: "All workplacements scheduled successfully",
 		}
-		s.EventRecorder.Eventf(w, nil, corev1.EventTypeNormal, "AllWorkplacementsScheduled", "AllWorkplacementsScheduled", "All workplacements scheduled successfully")
 	}
 
 	if apimeta.SetStatusCondition(&w.Status.Conditions, scheduleSucceededCond) {
 		apimeta.SetStatusCondition(&w.Status.Conditions, readyCond)
 		updated = true
+		switch scheduleSucceededCond.Reason {
+		case "AllWorkplacementsScheduled":
+			s.EventRecorder.Eventf(w, nil, corev1.EventTypeNormal, "AllWorkplacementsScheduled", "AllWorkplacementsScheduled",
+				"All workplacements scheduled successfully")
+		case scheduleSucceededConditionMismatchReason:
+			s.EventRecorder.Eventf(w, nil, corev1.EventTypeWarning, scheduleSucceededConditionMismatchReason, scheduleSucceededConditionMismatchReason,
+				"Target destination no longer matches destinationSelectors for workloadGroups: [%s] ",
+				strings.Join(misplacedWorkloadGroupIDs, ","))
+		}
 	}
 	return updated
 }
@@ -290,22 +297,31 @@ func (s *Scheduler) updateWorkPlacement(ctx context.Context, workloadGroup v1alp
 		}
 	}
 
+	alreadyMisplaced := workPlacement.GetLabels()[misscheduledLabel] == "true"
 	if misplaced {
 		s.labelWorkplacementAsMisplaced(workPlacement)
 	}
 
-	workPlacement.Spec.WorkGeneration = workGeneration
-	workPlacement.Spec.Workloads = workloadGroup.Workloads
-	if err := s.Client.Update(ctx, workPlacement); err != nil {
-		logging.Error(s.Log, err, "error updating WorkPlacement", "workplacement", workPlacement.Name)
-		return false, err
+	specChanged := workPlacement.Spec.WorkGeneration != workGeneration ||
+		!reflect.DeepEqual(workPlacement.Spec.Workloads, workloadGroup.Workloads)
+	labelChanged := misplaced && !alreadyMisplaced
+
+	if specChanged || labelChanged {
+		workPlacement.Spec.WorkGeneration = workGeneration
+		workPlacement.Spec.Workloads = workloadGroup.Workloads
+		if err := s.Client.Update(ctx, workPlacement); err != nil {
+			logging.Error(s.Log, err, "error updating WorkPlacement", "workplacement", workPlacement.Name)
+			return false, err
+		}
+		if specChanged {
+			logging.Info(s.Log, "successfully updated WorkPlacement workloads", "workplacement", workPlacement.Name)
+		}
 	}
 
 	if err := s.updateWorkPlacementStatus(ctx, workPlacement, misplaced); err != nil {
 		return false, err
 	}
 
-	logging.Info(s.Log, "successfully updated WorkPlacement workloads", "workplacement", workPlacement.Name)
 	return misplaced, nil
 }
 
