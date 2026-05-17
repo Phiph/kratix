@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/go-logr/logr"
 	"github.com/syntasso/kratix/api/v1alpha1"
@@ -59,11 +60,13 @@ type StateFile struct {
 	Files []string `json:"files"`
 }
 
-// WorkPlacementReconciler reconciles a WorkPlacement object
+// WorkPlacementReconciler reconciles a WorkPlacement object.
+// VersionCache is shared across reconcile goroutines (MaxConcurrentReconciles > 1),
+// so it must be a sync.Map.
 type WorkPlacementReconciler struct {
 	Client        client.Client
 	Log           logr.Logger
-	VersionCache  map[string]string
+	VersionCache  *sync.Map
 	EventRecorder record.EventRecorder
 
 	Dispatcher dispatch.Dispatcher
@@ -82,7 +85,7 @@ type workPlacementReconcileContext struct {
 	destination   *v1alpha1.Destination
 	dispatcher    dispatch.Dispatcher
 
-	versionCache map[string]string
+	versionCache *sync.Map
 }
 
 //+kubebuilder:rbac:groups=platform.kratix.io,resources=workplacements,verbs=get;list;watch;create;update;patch;delete
@@ -333,18 +336,21 @@ func (w *workPlacementReconcileContext) setVersionID(versionID string) {
 	if versionID == "" {
 		return
 	}
-	w.versionCache[w.workPlacement.GetUniqueID()] = versionID
+	w.versionCache.Store(w.workPlacement.GetUniqueID(), versionID)
 }
 
 func (w *workPlacementReconcileContext) getCachedVersionID(versionID string) string {
 	if versionID != "" {
 		return versionID
 	}
-	return w.versionCache[w.workPlacement.GetUniqueID()]
+	if v, ok := w.versionCache.Load(w.workPlacement.GetUniqueID()); ok {
+		return v.(string)
+	}
+	return ""
 }
 
 func (w *workPlacementReconcileContext) removeVersionIDFromCache() {
-	delete(w.versionCache, w.workPlacement.GetUniqueID())
+	w.versionCache.Delete(w.workPlacement.GetUniqueID())
 }
 
 func addWorkPlacementSpanAttributes(traceCtx *reconcileTrace, promiseName string, workPlacement *v1alpha1.WorkPlacement) {

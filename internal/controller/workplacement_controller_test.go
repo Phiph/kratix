@@ -19,6 +19,7 @@ package controller_test
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/syntasso/kratix/internal/controller"
@@ -121,7 +122,7 @@ var _ = Describe("WorkPlacementReconciler", func() {
 		reconciler = &controller.WorkPlacementReconciler{
 			Client:        fakeK8sClient,
 			Log:           ctrl.Log.WithName("controllers").WithName("Workplacement"),
-			VersionCache:  make(map[string]string),
+			VersionCache:  &sync.Map{},
 			EventRecorder: workplacementRecorder,
 			Dispatcher:    fakeDispatcher,
 		}

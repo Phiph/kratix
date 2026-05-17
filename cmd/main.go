@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -378,7 +379,7 @@ func main() {
 	if err = (&controller.WorkPlacementReconciler{
 		Client:        mgr.GetClient(),
 		Log:           ctrl.Log.WithName("controllers").WithName("WorkPlacementController"),
-		VersionCache:  make(map[string]string),
+		VersionCache:  &sync.Map{},
 		Dispatcher:    dispatcher,
 		EventRecorder: mgr.GetEventRecorderFor("WorkPlacementController"),
 	}).SetupWithManager(mgr); err != nil {
