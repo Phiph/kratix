@@ -51,19 +51,27 @@ type GitClientRequest struct {
 	NoProxy    string
 	Opts       []ClientOpts
 	Log        logr.Logger
+
+	// AllowFileURLForTest disables the URL-format validation (HTTPS or SSH).
+	// ONLY for tests; never set this in production. When true, the URL may
+	// be any string and is passed directly to git, which natively supports
+	// filesystem paths (a "file://" URL or plain path).
+	AllowFileURLForTest bool
 }
 
 func NewGitClient(req GitClientRequest) (*nativeGitClient, error) {
 	var accessToken string
 
-	switch req.Auth.Creds.(type) {
-	case SSHCreds:
-		if ok, _ := IsSSHURL(req.RawRepoURL); !ok {
-			return nil, fmt.Errorf("invalid URL for SSH auth method: %s", req.RawRepoURL)
-		}
-	default:
-		if !IsHTTPSURL(req.RawRepoURL) {
-			return nil, fmt.Errorf("invalid URL for HTTPS auth method: %s", req.RawRepoURL)
+	if !req.AllowFileURLForTest {
+		switch req.Auth.Creds.(type) {
+		case SSHCreds:
+			if ok, _ := IsSSHURL(req.RawRepoURL); !ok {
+				return nil, fmt.Errorf("invalid URL for SSH auth method: %s", req.RawRepoURL)
+			}
+		default:
+			if !IsHTTPSURL(req.RawRepoURL) {
+				return nil, fmt.Errorf("invalid URL for HTTPS auth method: %s", req.RawRepoURL)
+			}
 		}
 	}
 

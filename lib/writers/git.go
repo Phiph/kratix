@@ -71,8 +71,9 @@ func NewGitWriter(logger logr.Logger, stateStoreSpec v1alpha1.GitStateStoreSpec,
 			// NOTE: intentionally allowing insecure connections,
 			// due to pre-existing setting:
 			// https://github.com/syntasso/kratix/blob/59231e70b0a4a428067e3b909fd2e9dc07110997/lib/writers/git.go#L373
-			Insecure: true,
-			Log:      logger,
+			Insecure:            true,
+			Log:                 logger,
+			AllowFileURLForTest: os.Getenv("KRATIX_GIT_ALLOW_FILE_URL_FOR_TEST") == "1",
 		})
 	if err != nil {
 		return nil, fmt.Errorf("could not create git native client: %w", err)

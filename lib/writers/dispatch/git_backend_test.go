@@ -5,7 +5,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 
 	"github.com/go-logr/logr"
 	. "github.com/onsi/ginkgo/v2"
@@ -63,12 +62,6 @@ var _ = Describe("GitBackend integration", func() {
 
 	It("constructs, reads a present and missing file, and closes cleanly", func() {
 		b, err := dispatch.NewGitBackend(logr.Discard(), dest, spec, creds)
-		if err != nil && strings.Contains(err.Error(), "invalid URL for HTTPS auth method") {
-			// The underlying git client requires an https:// or ssh URL.
-			// Running against a local bare repo path requires a follow-up
-			// to relax that constraint or stand up a local git server.
-			Skip("local bare-repo path rejected by git client URL validation; skipping integration assertion")
-		}
 		Expect(err).NotTo(HaveOccurred())
 		defer b.Close()
 
