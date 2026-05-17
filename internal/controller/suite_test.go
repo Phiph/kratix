@@ -140,7 +140,9 @@ func setReconcileConfigureWorkflowToReturnFinished() {
 func setReconcileDeleteWorkflowToReturnFinished(obj client.Object) {
 	controller.SetReconcileDeleteWorkflow(func(w workflow.Opts) (bool, error) {
 		us := &unstructured.Unstructured{}
-		us.SetGroupVersionKind(obj.GetObjectKind().GroupVersionKind())
+		gvks, _, err := scheme.Scheme.ObjectKinds(obj)
+		Expect(err).NotTo(HaveOccurred())
+		us.SetGroupVersionKind(gvks[0])
 		Expect(fakeK8sClient.Get(ctx, types.NamespacedName{
 			Name:      obj.GetName(),
 			Namespace: obj.GetNamespace(),
@@ -154,7 +156,9 @@ func setReconcileDeleteWorkflowToReturnFinished(obj client.Object) {
 func setReconcileDeleteWorkflowToReturnError(obj client.Object) {
 	controller.SetReconcileDeleteWorkflow(func(w workflow.Opts) (bool, error) {
 		us := &unstructured.Unstructured{}
-		us.SetGroupVersionKind(obj.GetObjectKind().GroupVersionKind())
+		gvks, _, err := scheme.Scheme.ObjectKinds(obj)
+		Expect(err).NotTo(HaveOccurred())
+		us.SetGroupVersionKind(gvks[0])
 		Expect(fakeK8sClient.Get(ctx, types.NamespacedName{
 			Name:      obj.GetName(),
 			Namespace: obj.GetNamespace(),
