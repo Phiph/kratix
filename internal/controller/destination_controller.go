@@ -18,7 +18,6 @@ package controller
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"path/filepath"
 
@@ -37,6 +36,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/syntasso/kratix/api/v1alpha1"
 	"github.com/syntasso/kratix/internal/logging"
+	"github.com/syntasso/kratix/lib/writers/dispatch"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -54,11 +54,11 @@ const (
 
 // DestinationReconciler reconciles a Destination object
 type DestinationReconciler struct {
-	Client          client.Client
-	Log             logr.Logger
-	Scheduler       *Scheduler
-	EventRecorder   record.EventRecorder
-	RepositoryCache RepositoryCache
+	Client        client.Client
+	Log           logr.Logger
+	Scheduler     *Scheduler
+	EventRecorder record.EventRecorder
+	Dispatcher    dispatch.Dispatcher
 }
 
 type destinationReconcileContext struct {
@@ -69,8 +69,8 @@ type destinationReconcileContext struct {
 	client        client.Client
 	eventRecorder record.EventRecorder
 
-	destination     *v1alpha1.Destination
-	repositoryCache RepositoryCache
+	destination *v1alpha1.Destination
+	dispatcher  dispatch.Dispatcher
 }
 
 //+kubebuilder:rbac:groups=platform.kratix.io,resources=destinations,verbs=get;list;watch;create;update;patch;delete
@@ -109,13 +109,13 @@ func (r *DestinationReconciler) newReconcileContext(ctx context.Context, logger 
 		return nil, err
 	}
 	return &destinationReconcileContext{
-		ctx:             ctx,
-		controller:      "destination-controller",
-		logger:          logger,
-		client:          r.Client,
-		eventRecorder:   r.EventRecorder,
-		destination:     destination,
-		repositoryCache: r.RepositoryCache,
+		ctx:           ctx,
+		controller:    "destination-controller",
+		logger:        logger,
+		client:        r.Client,
+		eventRecorder: r.EventRecorder,
+		destination:   destination,
+		dispatcher:    r.Dispatcher,
 	}, nil
 }
 
@@ -133,42 +133,22 @@ func (d *destinationReconcileContext) Reconcile() (ctrl.Result, error) {
 		return ctrl.Result{}, d.setNotReadyStatus(v1alpha1.DestinationNotReadyReason, "Destination is not ready")
 	}
 
-	repo, err := d.repositoryCache.GetRepositoryByTypeAndName(
-		d.destination.Spec.StateStoreRef.Kind,
-		d.destination.Spec.StateStoreRef.Name,
-	)
-	if err != nil {
-		if errors.Is(err, ErrCacheMiss) {
-			// check if state store even exists
-			message := fmt.Sprintf("%s/%s", d.destination.Spec.StateStoreRef.Kind, d.destination.Spec.StateStoreRef.Name)
-			status := "StateStoreNotReady"
-			if !d.stateStoreExists() {
-				err = errors.New("not found")
-				status = "StateStoreNotFound"
-			}
-
-			d.logAndRecordEvent(err, message)
-			if err := d.setNotReadyStatus(status, fmt.Sprintf("%s: %s", message, err.Error())); err != nil {
-				return ctrl.Result{}, err
-			}
-			return defaultRequeue, nil
+	destKey, registerResult, registerErr := d.registerAndDestKey()
+	if registerErr != nil {
+		// Status-update failures propagate so the controller-runtime retries.
+		// Register / lookup failures surface as a requeue with the cause logged.
+		if registerResult == (ctrl.Result{}) {
+			return ctrl.Result{}, registerErr
 		}
-		return ctrl.Result{}, err
-	}
-
-	repo.Lock()
-	defer repo.Unlock()
-
-	if err := repo.Writer.Reset(); err != nil {
-		return defaultRequeue, nil
+		return registerResult, nil
 	}
 
 	if !d.destination.DeletionTimestamp.IsZero() {
-		return d.handleDeletion(repo)
+		return d.handleDeletion(destKey)
 	}
 
 	if !d.destination.Spec.InitWorkloads.Enabled {
-		if err := d.deleteCanaryFiles(repo); err != nil {
+		if err := d.deleteCanaryFiles(destKey); err != nil {
 			return ctrl.Result{}, err
 		}
 
@@ -179,7 +159,7 @@ func (d *destinationReconcileContext) Reconcile() (ctrl.Result, error) {
 	d.logger = d.logger.WithValues("path", d.destination.Spec.Path)
 
 	var writeErr error
-	if writeErr = d.writeTestFiles(repo); writeErr != nil {
+	if writeErr = d.writeTestFiles(destKey); writeErr != nil {
 		d.logAndRecordEvent(writeErr, "Failed to write test documents to State Store")
 	}
 
@@ -191,6 +171,91 @@ func (d *destinationReconcileContext) Reconcile() (ctrl.Result, error) {
 	}
 	d.logAndRecordEvent(nil, "Destination is Ready")
 	return ctrl.Result{}, d.setReadyStatus("TestDocumentsWritten", "Test documents written to State Store")
+}
+
+// registerAndDestKey looks up the referenced state-store object plus its secret,
+// registers the destination with the dispatcher under a destination-level key,
+// and returns the key. On any failure (state-store missing, secret missing,
+// register error) it updates the Destination status and returns defaultRequeue
+// alongside a non-nil error to signal "retry later".
+func (d *destinationReconcileContext) registerAndDestKey() (dispatch.DestinationKey, ctrl.Result, error) {
+	ref := d.destination.Spec.StateStoreRef
+	message := fmt.Sprintf("%s/%s", ref.Kind, ref.Name)
+
+	notReady := func(reason string, cause error) (dispatch.DestinationKey, ctrl.Result, error) {
+		d.logAndRecordEvent(cause, message)
+		if err := d.setNotReadyStatus(reason, fmt.Sprintf("%s: %s", message, cause.Error())); err != nil {
+			return dispatch.DestinationKey{}, ctrl.Result{}, err
+		}
+		return dispatch.DestinationKey{}, defaultRequeue, cause
+	}
+
+	switch ref.Kind {
+	case "GitStateStore":
+		ss := &v1alpha1.GitStateStore{}
+		if err := d.client.Get(d.ctx, client.ObjectKey{Name: ref.Name}, ss); err != nil {
+			if k8serrors.IsNotFound(err) {
+				return notReady("StateStoreNotFound", err)
+			}
+			return notReady("StateStoreNotReady", err)
+		}
+		creds, err := d.fetchSecretData(ss.Spec.SecretRef)
+		if err != nil {
+			return notReady("StateStoreNotReady", err)
+		}
+		key := dispatch.DestinationKey{
+			StateStoreKind: "GitStateStore",
+			StateStoreName: ref.Name,
+			Branch:         ss.Spec.Branch,
+			Path:           d.destination.Spec.Path,
+		}
+		if err := d.dispatcher.RegisterGitDestination(key, ss.Spec, creds); err != nil {
+			return notReady("StateStoreNotReady", err)
+		}
+		return key, ctrl.Result{}, nil
+	case "BucketStateStore":
+		ss := &v1alpha1.BucketStateStore{}
+		if err := d.client.Get(d.ctx, client.ObjectKey{Name: ref.Name}, ss); err != nil {
+			if k8serrors.IsNotFound(err) {
+				return notReady("StateStoreNotFound", err)
+			}
+			return notReady("StateStoreNotReady", err)
+		}
+		creds, err := d.fetchSecretData(ss.Spec.SecretRef)
+		if err != nil {
+			return notReady("StateStoreNotReady", err)
+		}
+		key := dispatch.DestinationKey{
+			StateStoreKind: "BucketStateStore",
+			StateStoreName: ref.Name,
+			Path:           d.destination.Spec.Path,
+		}
+		if err := d.dispatcher.RegisterS3Destination(key, ss.Spec, creds); err != nil {
+			return notReady("StateStoreNotReady", err)
+		}
+		return key, ctrl.Result{}, nil
+	default:
+		return notReady("StateStoreNotReady", fmt.Errorf("unsupported state store kind %q", ref.Kind))
+	}
+}
+
+// fetchSecretData reads the Secret referenced by the state store and returns
+// its Data map. A nil ref returns a nil map and no error (matches the
+// state-store reconciler behaviour for refless state stores, which is not
+// currently exercised but kept consistent).
+func (d *destinationReconcileContext) fetchSecretData(ref *v1.SecretReference) (map[string][]byte, error) {
+	if ref == nil {
+		return nil, nil
+	}
+	ns := ref.Namespace
+	if ns == "" {
+		ns = "default"
+	}
+	secret := &v1.Secret{}
+	if err := d.client.Get(d.ctx, types.NamespacedName{Name: ref.Name, Namespace: ns}, secret); err != nil {
+		return nil, err
+	}
+	return secret.Data, nil
 }
 
 func (d *destinationReconcileContext) setReadyStatus(reason, message string) error {
@@ -228,13 +293,16 @@ func (d *destinationReconcileContext) needsFinalizerUpdate() bool {
 	return false
 }
 
-func (d *destinationReconcileContext) writeTestFiles(repo *Repository) error {
+func (d *destinationReconcileContext) writeTestFiles(destKey dispatch.DestinationKey) error {
 	workloads := d.getCanaryWorkloads()
-	_, err := repo.Writer.UpdateFiles("", canaryWorkload, workloads, nil)
-	if err != nil {
-		return err
-	}
-	return nil
+	_, err := d.dispatcher.Submit(d.ctx, destKey, dispatch.Intent{
+		WorkPlacement: canaryWorkload,
+		SubDir:        "",
+		Decide: func(_ map[string][]byte) (dispatch.Writes, error) {
+			return dispatch.Writes{ToCreate: workloads}, nil
+		},
+	})
+	return err
 }
 
 func (r *DestinationReconciler) findDestinationsForStateStore(stateStoreType string) handler.MapFunc {
@@ -290,14 +358,14 @@ func (r *DestinationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-func (d *destinationReconcileContext) handleDeletion(repo *Repository) (ctrl.Result, error) {
+func (d *destinationReconcileContext) handleDeletion(destKey dispatch.DestinationKey) (ctrl.Result, error) {
 	if controllerutil.ContainsFinalizer(d.destination, destinationCleanupFinalizer) {
 		if success, err := d.deleteDestinationWorkplacements(); !success || err != nil {
 			logging.Error(d.logger, err, "error deleting destination workplacements")
 			return defaultRequeue, nil
 		}
 
-		if err := d.deleteCanaryFiles(repo); err != nil {
+		if err := d.deleteCanaryFiles(destKey); err != nil {
 			logging.Error(d.logger, err, "error deleting state store contents")
 			return defaultRequeue, nil
 		}
@@ -338,7 +406,7 @@ func (d *destinationReconcileContext) deleteDestinationWorkplacements() (bool, e
 	return true, nil
 }
 
-func (d *destinationReconcileContext) deleteCanaryFiles(repo *Repository) error {
+func (d *destinationReconcileContext) deleteCanaryFiles(destKey dispatch.DestinationKey) error {
 	logging.Debug(d.logger, "removing dependencies dir from repository")
 	workloadsToDelete := d.getCanaryWorkloads()
 
@@ -347,7 +415,14 @@ func (d *destinationReconcileContext) deleteCanaryFiles(repo *Repository) error 
 		filePaths = append(filePaths, w.Filepath)
 	}
 
-	return repo.Writer.DeleteFiles(canaryWorkload, filePaths)
+	_, err := d.dispatcher.Submit(d.ctx, destKey, dispatch.Intent{
+		WorkPlacement: canaryWorkload,
+		SubDir:        "",
+		Decide: func(_ map[string][]byte) (dispatch.Writes, error) {
+			return dispatch.Writes{ToDelete: filePaths}, nil
+		},
+	})
+	return err
 }
 
 func (d *destinationReconcileContext) getCanaryWorkloads() []v1alpha1.Workload {
@@ -409,26 +484,4 @@ func (d *destinationReconcileContext) logAndRecordEvent(err error, message strin
 			message,
 		)
 	}
-}
-
-func (d *destinationReconcileContext) stateStoreExists() bool {
-	switch d.destination.Spec.StateStoreRef.Kind {
-	case "GitStateStore":
-		return !k8serrors.IsNotFound(
-			d.client.Get(
-				d.ctx,
-				client.ObjectKey{Name: d.destination.Spec.StateStoreRef.Name},
-				&v1alpha1.GitStateStore{},
-			),
-		)
-	case "BucketStateStore":
-		return !k8serrors.IsNotFound(
-			d.client.Get(
-				d.ctx,
-				client.ObjectKey{Name: d.destination.Spec.StateStoreRef.Name},
-				&v1alpha1.BucketStateStore{},
-			),
-		)
-	}
-	return false
 }
