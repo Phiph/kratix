@@ -483,11 +483,11 @@ func assertCanaryFilesWereSubmitted(fake *dispatchfakes.FakeDispatcher, i int) {
 	ExpectWithOffset(1, writes.ToCreate).To(ConsistOf(
 		v1alpha1.Workload{
 			Filepath: "test-path/kratix-canary-namespace.yaml",
-			Content:  "apiVersion: v1\nkind: Namespace\nmetadata:\n  creationTimestamp: null\n  name: kratix-worker-system\nspec: {}\nstatus: {}\n",
+			Content:  "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: kratix-worker-system\nspec: {}\nstatus: {}\n",
 		},
 		v1alpha1.Workload{
 			Filepath: "test-path/kratix-canary-configmap.yaml",
-			Content:  "apiVersion: v1\ndata:\n  canary: this confirms your infrastructure is reading from Kratix state stores\nkind: ConfigMap\nmetadata:\n  creationTimestamp: null\n  name: kratix-info\n  namespace: kratix-worker-system\n",
+			Content:  "apiVersion: v1\ndata:\n  canary: this confirms your infrastructure is reading from Kratix state stores\nkind: ConfigMap\nmetadata:\n  name: kratix-info\n  namespace: kratix-worker-system\n",
 		},
 	))
 	ExpectWithOffset(1, writes.ToDelete).To(BeEmpty())

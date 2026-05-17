@@ -65,6 +65,30 @@ func TestSharedResourceCache_EntryExpires(t *testing.T) {
 	}
 }
 
+func TestSharedResourceCache_HitsAfterAPIServerPopulatesResourceVersion(t *testing.T) {
+	// Simulates the real applyResources flow: Applied is checked on a freshly-
+	// constructed object (no resourceVersion), then MarkApplied is called after
+	// Create/Update succeeds and controller-runtime has populated resourceVersion
+	// in-place. The cache must hit on the next reconcile with a fresh object.
+	c := NewSharedResourceCache()
+
+	fresh := makeServiceAccount("kratix-sa", map[string]string{"v": "1"})
+	if c.Applied("scope", fresh) {
+		t.Fatalf("expected miss before MarkApplied")
+	}
+
+	afterCreate := makeServiceAccount("kratix-sa", map[string]string{"v": "1"})
+	afterCreate.SetResourceVersion("42")
+	afterCreate.SetUID("some-uid")
+	afterCreate.SetGeneration(1)
+	c.MarkApplied("scope", afterCreate)
+
+	freshNext := makeServiceAccount("kratix-sa", map[string]string{"v": "1"})
+	if !c.Applied("scope", freshNext) {
+		t.Fatalf("expected cache hit: fresh object and post-Create object have the same content hash")
+	}
+}
+
 func TestSharedResourceCache_NilSafe(t *testing.T) {
 	var c *SharedResourceCache
 	sa := makeServiceAccount("kratix-sa", nil)

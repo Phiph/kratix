@@ -382,7 +382,9 @@ func (p *Promise) ToUnstructured() (*unstructured.Unstructured, error) {
 		return nil, err
 	}
 	unstructuredPromise := &unstructured.Unstructured{Object: objMap}
-
+	if unstructuredPromise.GetKind() == "" {
+		unstructuredPromise.SetGroupVersionKind(GroupVersion.WithKind("Promise"))
+	}
 	return unstructuredPromise, nil
 }
 

@@ -213,10 +213,16 @@ func (reconcileCtx *stateStoreReconcileContext) setStatus(status string, conditi
 }
 
 func (reconcileCtx *stateStoreReconcileContext) recordReadyEvent() {
-	eventMessage := fmt.Sprintf("%s %q is ready",
-		reconcileCtx.stateStore.GetObjectKind().GroupVersionKind().Kind,
-		reconcileCtx.stateStore.GetName(),
-	)
+	var kind string
+	switch reconcileCtx.stateStore.(type) {
+	case *v1alpha1.GitStateStore:
+		kind = "GitStateStore"
+	case *v1alpha1.BucketStateStore:
+		kind = "BucketStateStore"
+	default:
+		kind = "StateStore"
+	}
+	eventMessage := fmt.Sprintf("%s %q is ready", kind, reconcileCtx.stateStore.GetName())
 	reconcileCtx.eventRecorder.Eventf(reconcileCtx.stateStore, v1.EventTypeNormal, "Ready", eventMessage)
 }
 

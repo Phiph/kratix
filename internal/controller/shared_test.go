@@ -13,8 +13,10 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/yaml"
+	"k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	kubebuilder "sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
@@ -88,7 +90,13 @@ type testReconciler struct {
 func (t *testReconciler) reconcileUntilCompletion(r kubebuilder.Reconciler, obj client.Object, opts ...*opts) (ctrl.Result, error) {
 	t.reconcileCount++
 	k8sObj := &unstructured.Unstructured{}
-	k8sObj.SetGroupVersionKind(obj.GetObjectKind().GroupVersionKind())
+	gvk := obj.GetObjectKind().GroupVersionKind()
+	if gvk.Empty() {
+		var gvkErr error
+		gvk, gvkErr = apiutil.GVKForObject(obj, scheme.Scheme)
+		Expect(gvkErr).NotTo(HaveOccurred())
+	}
+	k8sObj.SetGroupVersionKind(gvk)
 
 	namespacedName := types.NamespacedName{
 		Name:      obj.GetName(),
@@ -135,7 +143,7 @@ func (t *testReconciler) reconcileUntilCompletion(r kubebuilder.Reconciler, obj 
 	}
 
 	newK8sObj := &unstructured.Unstructured{}
-	newK8sObj.SetGroupVersionKind(obj.GetObjectKind().GroupVersionKind())
+	newK8sObj.SetGroupVersionKind(gvk)
 	err = fakeK8sClient.Get(context.Background(), namespacedName, newK8sObj)
 	if err != nil {
 		if errors.IsNotFound(err) {

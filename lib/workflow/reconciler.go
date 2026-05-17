@@ -135,15 +135,25 @@ func sharedResourceKey(scope string, obj client.Object) string {
 	)
 }
 
-// contentHash returns a short stable hash of the object's marshalled form.
+// contentHash returns a short stable hash of the object's spec/data content.
+// Server-managed fields (ResourceVersion, UID, Generation, CreationTimestamp,
+// ManagedFields) are stripped before hashing so that the hash produced from a
+// freshly-constructed object matches the hash produced after a successful
+// Create/Update — both represent the same desired content.
 // Hash failures degrade to a constant sentinel so callers still get safe
 // (cache-miss) behaviour rather than a panic.
 func contentHash(obj client.Object) string {
-	bytes, err := json.Marshal(obj)
+	cp := obj.DeepCopyObject().(client.Object)
+	cp.SetResourceVersion("")
+	cp.SetUID("")
+	cp.SetGeneration(0)
+	cp.SetCreationTimestamp(metav1.Time{})
+	cp.SetManagedFields(nil)
+	b, err := json.Marshal(cp)
 	if err != nil {
 		return "unhashable"
 	}
-	sum := sha256.Sum256(bytes)
+	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:8])
 }
 
