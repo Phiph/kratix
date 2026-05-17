@@ -6,8 +6,6 @@ import (
 	"fmt"
 
 	"github.com/go-logr/logr"
-	"github.com/syntasso/kratix/api/v1alpha1"
-	"github.com/syntasso/kratix/internal/logging"
 	v1 "k8s.io/api/core/v1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -17,6 +15,10 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+
+	"github.com/syntasso/kratix/api/v1alpha1"
+	"github.com/syntasso/kratix/internal/logging"
+	"github.com/syntasso/kratix/lib/writers/dispatch"
 )
 
 type StateStore interface {
@@ -102,45 +104,78 @@ type stateStoreReconcileContext struct {
 
 	stateStore       StateStore
 	stateStoreSecret v1.Secret
-	repositoryCache  RepositoryCache
+	dispatcher       dispatch.Dispatcher
+}
+
+// destKey derives the state-store-level DestinationKey for the reconciled
+// state store. Path is empty because the state-store reconcile registers and
+// validates the state store itself; per-destination keys (with Path set) are
+// produced by destination/workplacement controllers.
+func (reconcileCtx *stateStoreReconcileContext) destKey() (dispatch.DestinationKey, error) {
+	switch ss := reconcileCtx.stateStore.(type) {
+	case *v1alpha1.GitStateStore:
+		return dispatch.DestinationKey{
+			StateStoreKind: "GitStateStore",
+			StateStoreName: ss.Name,
+			Branch:         ss.Spec.Branch,
+		}, nil
+	case *v1alpha1.BucketStateStore:
+		return dispatch.DestinationKey{
+			StateStoreKind: "BucketStateStore",
+			StateStoreName: ss.Name,
+		}, nil
+	default:
+		return dispatch.DestinationKey{}, fmt.Errorf("unsupported state store type: %T", reconcileCtx.stateStore)
+	}
+}
+
+// registerDestination calls the appropriate Register method on the dispatcher
+// based on the state store's concrete type.
+func (reconcileCtx *stateStoreReconcileContext) registerDestination(key dispatch.DestinationKey) error {
+	switch ss := reconcileCtx.stateStore.(type) {
+	case *v1alpha1.GitStateStore:
+		return reconcileCtx.dispatcher.RegisterGitDestination(key, ss.Spec, reconcileCtx.stateStoreSecret.Data)
+	case *v1alpha1.BucketStateStore:
+		return reconcileCtx.dispatcher.RegisterS3Destination(key, ss.Spec, reconcileCtx.stateStoreSecret.Data)
+	default:
+		return fmt.Errorf("unsupported state store type: %T", reconcileCtx.stateStore)
+	}
 }
 
 func (reconcileCtx *stateStoreReconcileContext) Reconcile() (ctrl.Result, error) {
-	if reconcileCtx.stateStore.GetGeneration() != reconcileCtx.stateStore.GetObservedGeneration() {
-		if err := reconcileCtx.repositoryCache.Cleanup(reconcileCtx.stateStore); err != nil {
-			return ctrl.Result{}, err
-		}
-	}
-
-	repository, err := reconcileCtx.repositoryCache.InitRepository(
-		reconcileCtx.logger,
-		reconcileCtx.stateStore,
-		reconcileCtx.stateStoreSecret,
-	)
+	key, err := reconcileCtx.destKey()
 	if err != nil {
-		logging.Error(reconcileCtx.logger, err, "unable to get repository")
-		if err := reconcileCtx.setNotReadyStatus(err); err != nil {
-			return ctrl.Result{}, err
+		return ctrl.Result{}, err
+	}
+
+	if reconcileCtx.stateStore.GetGeneration() != reconcileCtx.stateStore.GetObservedGeneration() {
+		if cleanupErr := reconcileCtx.dispatcher.Cleanup(key); cleanupErr != nil {
+			return ctrl.Result{}, cleanupErr
+		}
+	}
+
+	if registerErr := reconcileCtx.registerDestination(key); registerErr != nil {
+		logging.Error(reconcileCtx.logger, registerErr, "unable to register destination")
+		if statusErr := reconcileCtx.setNotReadyStatus(NewInitialiseWriterError(registerErr)); statusErr != nil {
+			return ctrl.Result{}, statusErr
 		}
 		return defaultRequeue, nil
 	}
-	repository.Lock()
-	defer repository.Unlock()
 
-	if err := repository.Writer.ValidatePermissions(); err != nil {
-		logging.Error(reconcileCtx.logger, err, "unable to validate permissions")
-		_ = reconcileCtx.repositoryCache.Cleanup(reconcileCtx.stateStore)
-		if err := reconcileCtx.setNotReadyStatus(NewValidatePermissionsError(err)); err != nil {
-			return ctrl.Result{}, err
+	if validateErr := reconcileCtx.dispatcher.Validate(reconcileCtx.ctx, key); validateErr != nil {
+		logging.Error(reconcileCtx.logger, validateErr, "unable to validate permissions")
+		_ = reconcileCtx.dispatcher.Cleanup(key)
+		if statusErr := reconcileCtx.setNotReadyStatus(NewValidatePermissionsError(validateErr)); statusErr != nil {
+			return ctrl.Result{}, statusErr
 		}
 		return defaultRequeue, nil
 	}
 
-	if err := reconcileCtx.setReadyStatus(); err != nil {
-		if kerrors.IsConflict(err) {
+	if statusErr := reconcileCtx.setReadyStatus(); statusErr != nil {
+		if kerrors.IsConflict(statusErr) {
 			return fastRequeue, nil
 		}
-		return ctrl.Result{}, err
+		return ctrl.Result{}, statusErr
 	}
 	return ctrl.Result{}, nil
 }

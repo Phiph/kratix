@@ -12,7 +12,6 @@ import (
 	"github.com/syntasso/kratix/internal/logging"
 	"github.com/syntasso/kratix/internal/telemetry"
 	"github.com/syntasso/kratix/lib/resourceutil"
-	"github.com/syntasso/kratix/lib/writers"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -41,14 +40,6 @@ const (
 	StateStoreNotReadyErrorInitialisingWriterMessage    = "Error initialising writer"
 	StateStoreNotReadyErrorValidatingPermissionsReason  = "ErrorValidatingPermissions"
 	StateStoreNotReadyErrorValidatingPermissionsMessage = "Error validating state store permissions"
-)
-
-var (
-	newS3Writer func(logger logr.Logger, stateStoreSpec v1alpha1.BucketStateStoreSpec, destinationPath string,
-		creds map[string][]byte) (writers.StateStoreWriter, error) = writers.NewS3Writer
-
-	newGitWriter func(logger logr.Logger, stateStoreSpec v1alpha1.GitStateStoreSpec, destinationPath string,
-		creds map[string][]byte) (writers.StateStoreWriter, error) = writers.NewGitWriter
 )
 
 type opts struct {

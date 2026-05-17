@@ -24,16 +24,17 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"github.com/syntasso/kratix/api/v1alpha1"
-	"github.com/syntasso/kratix/internal/controller"
-	"github.com/syntasso/kratix/internal/controller/controllerfakes"
-	"github.com/syntasso/kratix/lib/writers/writersfakes"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/syntasso/kratix/api/v1alpha1"
+	"github.com/syntasso/kratix/internal/controller"
+	"github.com/syntasso/kratix/lib/writers/dispatch"
+	"github.com/syntasso/kratix/lib/writers/dispatch/dispatchfakes"
 )
 
 var _ = Describe("DestinationReconciler", func() {
@@ -42,25 +43,23 @@ var _ = Describe("DestinationReconciler", func() {
 		testDestination     *v1alpha1.Destination
 		testDestinationName client.ObjectKey
 		reconciler          *controller.DestinationReconciler
-		fakeWriter          *writersfakes.FakeStateStoreWriter
+		fakeDispatcher      *dispatchfakes.FakeDispatcher
 		stateStoreSecret    *corev1.Secret
 		stateStore          client.Object
 		eventRecorder       *record.FakeRecorder
 		updatedDestination  *v1alpha1.Destination
-		repositoryCache     *controllerfakes.FakeRepositoryCache
 	)
 
 	BeforeEach(func() {
 		eventRecorder = record.NewFakeRecorder(1024)
-		repositoryCache = &controllerfakes.FakeRepositoryCache{}
+		fakeDispatcher = &dispatchfakes.FakeDispatcher{}
 		ctx = context.Background()
 
-		fakeWriter = &writersfakes.FakeStateStoreWriter{}
 		reconciler = &controller.DestinationReconciler{
-			Client:          fakeK8sClient,
-			EventRecorder:   eventRecorder,
-			Log:             ctrl.Log.WithName("controllers").WithName("Destination"),
-			RepositoryCache: repositoryCache,
+			Client:        fakeK8sClient,
+			EventRecorder: eventRecorder,
+			Log:           ctrl.Log.WithName("controllers").WithName("Destination"),
+			Dispatcher:    fakeDispatcher,
 		}
 
 		name := "test-destination"
@@ -88,10 +87,6 @@ var _ = Describe("DestinationReconciler", func() {
 			},
 		}
 		updatedDestination = &v1alpha1.Destination{}
-
-		repositoryCache.GetRepositoryByTypeAndNameReturns(&controller.Repository{
-			Writer: fakeWriter,
-		}, nil)
 	})
 
 	When("the destination does not exist", func() {
@@ -117,7 +112,6 @@ var _ = Describe("DestinationReconciler", func() {
 
 					setup.SetDestinationStateStoreRef(testDestination)
 
-					fakeWriter.UpdateFilesReturns("", nil)
 					Expect(fakeK8sClient.Create(ctx, testDestination)).To(Succeed())
 				})
 
@@ -141,9 +135,10 @@ var _ = Describe("DestinationReconciler", func() {
 						)))
 					})
 
-					It("creates the init workloads", func() {
-						Expect(fakeWriter.UpdateFilesCallCount()).To(Equal(2))
-						assertCanaryFilesWereCreated(fakeWriter)
+					It("submits two create intents to the dispatcher", func() {
+						Expect(fakeDispatcher.SubmitCallCount()).To(Equal(2))
+						assertCanaryFilesWereSubmitted(fakeDispatcher, 0)
+						assertCanaryFilesWereSubmitted(fakeDispatcher, 1)
 					})
 
 					It("publishes a success event", func() {
@@ -176,8 +171,16 @@ var _ = Describe("DestinationReconciler", func() {
 							)))
 						})
 
-						It("does not create any test workloads", func() {
-							Expect(fakeWriter.UpdateFilesCallCount()).To(Equal(0))
+						It("submits only delete intents (no create)", func() {
+							Expect(fakeDispatcher.SubmitCallCount()).To(Equal(2))
+							for i := 0; i < fakeDispatcher.SubmitCallCount(); i++ {
+								writes := decideWrites(fakeDispatcher, i)
+								Expect(writes.ToCreate).To(BeEmpty())
+								Expect(writes.ToDelete).To(ConsistOf(
+									"test-path/kratix-canary-namespace.yaml",
+									"test-path/kratix-canary-configmap.yaml",
+								))
+							}
 						})
 
 						It("publishes a success event", func() {
@@ -191,8 +194,8 @@ var _ = Describe("DestinationReconciler", func() {
 						BeforeEach(func() {
 							result, reconcileErr = t.reconcileUntilCompletion(reconciler, testDestination)
 							fakeK8sClient.Get(ctx, testDestinationName, updatedDestination)
-							Expect(fakeWriter.UpdateFilesCallCount()).To(Equal(2))
-							assertCanaryFilesWereCreated(fakeWriter)
+							Expect(fakeDispatcher.SubmitCallCount()).To(Equal(2))
+							assertCanaryFilesWereSubmitted(fakeDispatcher, 0)
 
 							var dest v1alpha1.Destination
 							Expect(fakeK8sClient.Get(ctx, testDestinationName, &dest)).To(Succeed())
@@ -200,16 +203,21 @@ var _ = Describe("DestinationReconciler", func() {
 							Expect(fakeK8sClient.Update(ctx, &dest)).To(Succeed())
 						})
 
-						It("removes the condition and deletes the files", func() {
+						It("removes the condition and submits delete intents", func() {
 							Expect(reconcileErr).NotTo(HaveOccurred())
-							Expect(fakeWriter.DeleteFilesCallCount()).To(Equal(2))
-							workPlacementName, workloadsToDelete := fakeWriter.DeleteFilesArgsForCall(0)
-							Expect(workPlacementName).To(Equal("kratix-canary"))
-							Expect(workloadsToDelete).To(ConsistOf("test-path/kratix-canary-namespace.yaml", "test-path/kratix-canary-configmap.yaml"))
-
-							workPlacementName, workloadsToDelete = fakeWriter.DeleteFilesArgsForCall(1)
-							Expect(workPlacementName).To(Equal("kratix-canary"))
-							Expect(workloadsToDelete).To(ConsistOf("test-path/kratix-canary-namespace.yaml", "test-path/kratix-canary-configmap.yaml"))
+							// Two creates from the first reconcile, then two
+							// deletes from the second.
+							Expect(fakeDispatcher.SubmitCallCount()).To(Equal(4))
+							for i := 2; i < 4; i++ {
+								_, _, intent := fakeDispatcher.SubmitArgsForCall(i)
+								Expect(intent.WorkPlacement).To(Equal("kratix-canary"))
+								writes := decideIntent(intent)
+								Expect(writes.ToCreate).To(BeEmpty())
+								Expect(writes.ToDelete).To(ConsistOf(
+									"test-path/kratix-canary-namespace.yaml",
+									"test-path/kratix-canary-configmap.yaml",
+								))
+							}
 						})
 
 						It("updates the destination status condition", func() {
@@ -225,7 +233,7 @@ var _ = Describe("DestinationReconciler", func() {
 
 				When("writing the test resources to the destination fails", func() {
 					BeforeEach(func() {
-						fakeWriter.UpdateFilesReturns("", errors.New("update file error"))
+						fakeDispatcher.SubmitReturns(dispatch.Result{}, errors.New("update file error"))
 						Expect(fakeK8sClient.Get(ctx, testDestinationName, updatedDestination)).To(Succeed())
 					})
 
@@ -250,9 +258,11 @@ var _ = Describe("DestinationReconciler", func() {
 					})
 				})
 
-				When("the reposistory is not ready", func() {
+				When("registering the destination with the dispatcher fails", func() {
 					BeforeEach(func() {
-						repositoryCache.GetRepositoryByTypeAndNameReturns(nil, controller.ErrCacheMiss)
+						fakeDispatcher.RegisterGitDestinationReturns(errors.New("register error"))
+						fakeDispatcher.RegisterS3DestinationReturns(errors.New("register error"))
+						Expect(fakeK8sClient.Get(ctx, testDestinationName, updatedDestination)).To(Succeed())
 					})
 
 					It("tries again later", func() {
@@ -263,16 +273,13 @@ var _ = Describe("DestinationReconciler", func() {
 					It("updates the destination status condition", func() {
 						Expect(updatedDestination.Status.Conditions).To(ContainElement(SatisfyAll(
 							HaveField("Type", "Ready"),
-							HaveField("Message", ContainSubstring("not ready")),
 							HaveField("Reason", "StateStoreNotReady"),
 							HaveField("Status", metav1.ConditionFalse),
 						)))
 					})
 
 					It("publishes a failure event", func() {
-						Expect(eventRecorder.Events).To(Receive(ContainSubstring(
-							"not ready"),
-						))
+						Expect(eventRecorder.Events).To(Receive(ContainSubstring("register error")))
 					})
 				})
 
@@ -304,7 +311,10 @@ var _ = Describe("DestinationReconciler", func() {
 						})
 
 						When("the destination is deleted", func() {
+							var submitCountBeforeDelete int
+
 							BeforeEach(func() {
+								submitCountBeforeDelete = fakeDispatcher.SubmitCallCount()
 								Expect(fakeK8sClient.Delete(ctx, testDestination)).To(Succeed())
 							})
 
@@ -321,11 +331,18 @@ var _ = Describe("DestinationReconciler", func() {
 								Expect(fakeK8sClient.Get(ctx, client.ObjectKeyFromObject(&workPlacement), &v1alpha1.WorkPlacement{})).To(MatchError(ContainSubstring("not found")))
 							})
 
-							It("should clean up the statestore", func() {
-								Expect(fakeWriter.DeleteFilesCallCount()).To(Equal(1))
-								workPlacementName, workloadsToDelete := fakeWriter.DeleteFilesArgsForCall(0)
-								Expect(workPlacementName).To(Equal("kratix-canary"))
-								Expect(workloadsToDelete).To(ConsistOf("test-path/kratix-canary-namespace.yaml", "test-path/kratix-canary-configmap.yaml"))
+							It("should clean up the statestore via the dispatcher", func() {
+								// On deletion exactly one additional Submit
+								// is made: the delete-canary intent.
+								Expect(fakeDispatcher.SubmitCallCount()).To(Equal(submitCountBeforeDelete + 1))
+								_, _, intent := fakeDispatcher.SubmitArgsForCall(submitCountBeforeDelete)
+								Expect(intent.WorkPlacement).To(Equal("kratix-canary"))
+								writes := decideIntent(intent)
+								Expect(writes.ToCreate).To(BeEmpty())
+								Expect(writes.ToDelete).To(ConsistOf(
+									"test-path/kratix-canary-namespace.yaml",
+									"test-path/kratix-canary-configmap.yaml",
+								))
 							})
 						})
 					})
@@ -344,7 +361,10 @@ var _ = Describe("DestinationReconciler", func() {
 						})
 
 						When("the destination is deleted", func() {
+							var submitCountBeforeDelete int
+
 							BeforeEach(func() {
+								submitCountBeforeDelete = fakeDispatcher.SubmitCallCount()
 								Expect(fakeK8sClient.Delete(ctx, testDestination)).To(Succeed())
 							})
 
@@ -361,15 +381,12 @@ var _ = Describe("DestinationReconciler", func() {
 								Expect(fakeK8sClient.Get(ctx, client.ObjectKeyFromObject(&workPlacement), &v1alpha1.WorkPlacement{})).Should(Succeed())
 							})
 
-							It("should not clean up the statestore", func() {
-								Expect(fakeWriter.UpdateFilesCallCount()).To(Equal(2))
-								Expect(fakeWriter.DeleteFilesCallCount()).To(Equal(0))
+							It("should not submit any additional intents after delete", func() {
+								Expect(fakeDispatcher.SubmitCallCount()).To(Equal(submitCountBeforeDelete))
 							})
 						})
-
 					})
 				})
-
 			})
 		}
 	})
@@ -443,11 +460,27 @@ var stateStoreSetups = map[string]StateStoreSetup{
 	},
 }
 
-func assertCanaryFilesWereCreated(fakeWriter *writersfakes.FakeStateStoreWriter) {
-	dir, workPlacementName, workloadsToCreate, workloadsToDelete := fakeWriter.UpdateFilesArgsForCall(0)
-	ExpectWithOffset(1, dir).To(Equal(""))
-	ExpectWithOffset(1, workPlacementName).To(Equal("kratix-canary"))
-	ExpectWithOffset(1, workloadsToCreate).To(ConsistOf(
+// decideIntent runs the intent's Decide callback with an empty reads map and
+// returns the Writes it produced. Destination-controller intents ignore reads.
+func decideIntent(intent dispatch.Intent) dispatch.Writes {
+	ExpectWithOffset(1, intent.Decide).NotTo(BeNil())
+	writes, err := intent.Decide(map[string][]byte{})
+	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	return writes
+}
+
+// decideWrites fetches the i-th Submit call and runs its Decide callback.
+func decideWrites(fake *dispatchfakes.FakeDispatcher, i int) dispatch.Writes {
+	_, _, intent := fake.SubmitArgsForCall(i)
+	return decideIntent(intent)
+}
+
+func assertCanaryFilesWereSubmitted(fake *dispatchfakes.FakeDispatcher, i int) {
+	_, _, intent := fake.SubmitArgsForCall(i)
+	ExpectWithOffset(1, intent.WorkPlacement).To(Equal("kratix-canary"))
+	ExpectWithOffset(1, intent.SubDir).To(Equal(""))
+	writes := decideIntent(intent)
+	ExpectWithOffset(1, writes.ToCreate).To(ConsistOf(
 		v1alpha1.Workload{
 			Filepath: "test-path/kratix-canary-namespace.yaml",
 			Content:  "apiVersion: v1\nkind: Namespace\nmetadata:\n  creationTimestamp: null\n  name: kratix-worker-system\nspec: {}\nstatus: {}\n",
@@ -457,6 +490,5 @@ func assertCanaryFilesWereCreated(fakeWriter *writersfakes.FakeStateStoreWriter)
 			Content:  "apiVersion: v1\ndata:\n  canary: this confirms your infrastructure is reading from Kratix state stores\nkind: ConfigMap\nmetadata:\n  creationTimestamp: null\n  name: kratix-info\n  namespace: kratix-worker-system\n",
 		},
 	))
-
-	ExpectWithOffset(1, workloadsToDelete).To(BeNil())
+	ExpectWithOffset(1, writes.ToDelete).To(BeEmpty())
 }

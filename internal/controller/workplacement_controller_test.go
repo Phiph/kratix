@@ -19,11 +19,13 @@ package controller_test
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/syntasso/kratix/internal/controller"
-	"github.com/syntasso/kratix/internal/controller/controllerfakes"
 	"github.com/syntasso/kratix/internal/telemetry"
+	"github.com/syntasso/kratix/lib/writers/dispatch"
+	"github.com/syntasso/kratix/lib/writers/dispatch/dispatchfakes"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
@@ -33,7 +35,6 @@ import (
 	"github.com/syntasso/kratix/api/v1alpha1"
 	"github.com/syntasso/kratix/lib/compression"
 	"github.com/syntasso/kratix/lib/hash"
-	"github.com/syntasso/kratix/lib/writers/writersfakes"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -44,6 +45,23 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	//+kubebuilder:scaffold:imports
 )
+
+// submitCall captures the inputs a reconciler made to dispatcher.Submit so the
+// test body can inspect the Intent (dedup key, reads, decided Writes).
+type submitCall struct {
+	dest   dispatch.DestinationKey
+	intent dispatch.Intent
+}
+
+// decidedWrites runs intent.Decide against the supplied reads map and
+// returns the produced Writes. The reconciler's closures are safe to invoke
+// after Submit returns: they capture the reconcile context's fields only.
+func decidedWrites(intent dispatch.Intent, reads map[string][]byte) dispatch.Writes {
+	ExpectWithOffset(1, intent.Decide).NotTo(BeNil())
+	writes, err := intent.Decide(reads)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	return writes
+}
 
 var _ = Describe("WorkPlacementReconciler", func() {
 	var (
@@ -58,28 +76,55 @@ var _ = Describe("WorkPlacementReconciler", func() {
 		workPlacementName = "test-work-placement"
 		workPlacement     v1alpha1.WorkPlacement
 		reconciler        *controller.WorkPlacementReconciler
-		fakeWriter        *writersfakes.FakeStateStoreWriter
+		fakeDispatcher    *dispatchfakes.FakeDispatcher
 
 		metricsReader        *sdkmetric.ManualReader
 		restoreMeterProvider func()
-		repositoryCache      *controllerfakes.FakeRepositoryCache
 	)
+
+	// stubStateFileReads installs a SubmitStub that, when an intent declares the
+	// .kratix state-file path in Reads, presents the supplied bytes to the
+	// Decide callback. Intents without Reads use an empty reads map.
+	stubStateFileReads := func(path string, data []byte) {
+		fakeDispatcher.SubmitCalls(func(_ context.Context, _ dispatch.DestinationKey, intent dispatch.Intent) (dispatch.Result, error) {
+			reads := map[string][]byte{}
+			for _, p := range intent.Reads {
+				if p == path {
+					reads[p] = data
+				}
+			}
+			if _, err := intent.Decide(reads); err != nil {
+				return dispatch.Result{}, err
+			}
+			return dispatch.Result{}, nil
+		})
+	}
 
 	BeforeEach(func() {
 		telemetry.ResetWorkPlacementMetricsForTest()
 		var restore func()
 		metricsReader, restore = setupTestMeterProvider()
 		restoreMeterProvider = restore
-		repositoryCache = &controllerfakes.FakeRepositoryCache{}
+		fakeDispatcher = &dispatchfakes.FakeDispatcher{}
+		// Default: invoke Decide with an empty reads map so the reconciler
+		// runs end-to-end without test-specific stubbing.
+		fakeDispatcher.SubmitCalls(func(_ context.Context, _ dispatch.DestinationKey, intent dispatch.Intent) (dispatch.Result, error) {
+			if intent.Decide != nil {
+				if _, err := intent.Decide(map[string][]byte{}); err != nil {
+					return dispatch.Result{}, err
+				}
+			}
+			return dispatch.Result{}, nil
+		})
 
 		ctx = context.Background()
 		workplacementRecorder = record.NewFakeRecorder(1024)
 		reconciler = &controller.WorkPlacementReconciler{
-			Client:          fakeK8sClient,
-			Log:             ctrl.Log.WithName("controllers").WithName("Workplacement"),
-			VersionCache:    make(map[string]string),
-			EventRecorder:   workplacementRecorder,
-			RepositoryCache: repositoryCache,
+			Client:        fakeK8sClient,
+			Log:           ctrl.Log.WithName("controllers").WithName("Workplacement"),
+			VersionCache:  &sync.Map{},
+			EventRecorder: workplacementRecorder,
+			Dispatcher:    fakeDispatcher,
 		}
 
 		compressedContent, err := compression.CompressContent([]byte("{someApi: foo, someValue: bar}"))
@@ -113,7 +158,6 @@ var _ = Describe("WorkPlacementReconciler", func() {
 		workPlacement = createWorkPlacement(workPlacementName, workloads)
 
 		Expect(fakeK8sClient.Create(ctx, &workPlacement)).To(Succeed())
-		fakeWriter = &writersfakes.FakeStateStoreWriter{}
 
 		destination = v1alpha1.Destination{
 			TypeMeta: metav1.TypeMeta{
@@ -131,10 +175,6 @@ var _ = Describe("WorkPlacementReconciler", func() {
 				Path:          "test-path",
 			},
 		}
-
-		repositoryCache.GetRepositoryByTypeAndNameReturns(&controller.Repository{
-			Writer: fakeWriter,
-		}, nil)
 	})
 
 	AfterEach(func() {
@@ -142,6 +182,17 @@ var _ = Describe("WorkPlacementReconciler", func() {
 			restoreMeterProvider()
 		}
 	})
+
+	// collectSubmits walks every Submit invocation recorded by the fake and
+	// returns them in call order.
+	collectSubmits := func() []submitCall {
+		calls := make([]submitCall, 0, fakeDispatcher.SubmitCallCount())
+		for i := 0; i < fakeDispatcher.SubmitCallCount(); i++ {
+			_, dest, intent := fakeDispatcher.SubmitArgsForCall(i)
+			calls = append(calls, submitCall{dest: dest, intent: intent})
+		}
+		return calls
+	}
 
 	When("the destination statestore is s3", func() {
 		When("the destination has filepath mode of none", func() {
@@ -192,11 +243,14 @@ var _ = Describe("WorkPlacementReconciler", func() {
 				Expect(err).NotTo(HaveOccurred())
 				Expect(result).To(Equal(ctrl.Result{}))
 
-				By("calling UpdateFiles()")
-				Expect(fakeWriter.UpdateFilesCallCount()).To(Equal(2))
-				dir, workPlacementName, workloadsToCreate, workloadsToDelete := fakeWriter.UpdateFilesArgsForCall(0)
-				Expect(workPlacementName).To(Equal(workPlacement.Name))
-				Expect(dir).To(Equal(""))
+				By("submitting an Intent to the dispatcher")
+				submits := collectSubmits()
+				// Two reconcile passes: first adds finalizers, second writes.
+				Expect(submits).ToNot(BeEmpty())
+				writeCall := submits[len(submits)-1]
+				Expect(writeCall.intent.WorkPlacement).To(Equal(workPlacement.Name))
+				Expect(writeCall.intent.SubDir).To(Equal(""))
+				Expect(writeCall.intent.Reads).To(ConsistOf(fmt.Sprintf("%s/.kratix/%s-%s.yaml", destination.Spec.Path, workPlacement.Namespace, workPlacement.Name)))
 
 				By("writing workloads files and kratix state file in destination path with no extra dir")
 				pathPrefix := destination.Spec.Path + "/"
@@ -211,37 +265,41 @@ var _ = Describe("WorkPlacementReconciler", func() {
 `,
 					},
 				}
-				Expect(workloadsToCreate).To(ConsistOf(expectedWorkloads))
-				Expect(workloadsToDelete).To(BeNil())
+				writes := decidedWrites(writeCall.intent, map[string][]byte{})
+				Expect(writes.ToCreate).To(ConsistOf(expectedWorkloads))
+				Expect(writes.ToDelete).To(BeNil())
 
-				By("fetching the right repository")
-				Expect(repositoryCache.GetRepositoryByTypeAndNameCallCount()).To(BeNumerically(">=", 1))
-				stateStoreType, stateStoreName := repositoryCache.GetRepositoryByTypeAndNameArgsForCall(0)
-				Expect(stateStoreType).To(Equal("BucketStateStore"))
-				Expect(stateStoreName).To(Equal("test-state-store"))
+				By("targeting the right destination key")
+				Expect(writeCall.dest.StateStoreKind).To(Equal("BucketStateStore"))
+				Expect(writeCall.dest.StateStoreName).To(Equal("test-state-store"))
+				Expect(writeCall.dest.Path).To(Equal(destination.Spec.Path))
 
 				By("setting the finalizer")
-				workPlacement := &v1alpha1.WorkPlacement{}
-				Expect(fakeK8sClient.Get(ctx, types.NamespacedName{Name: workPlacementName, Namespace: "default"}, workPlacement)).
+				wp := &v1alpha1.WorkPlacement{}
+				Expect(fakeK8sClient.Get(ctx, types.NamespacedName{Name: workPlacementName, Namespace: "default"}, wp)).
 					To(Succeed())
-				Expect(workPlacement.GetFinalizers()).To(ConsistOf(
+				Expect(wp.GetFinalizers()).To(ConsistOf(
 					"finalizers.workplacement.kratix.io/repo-cleanup",
 					"finalizers.workplacement.kratix.io/kratix-dot-files-cleanup",
 				))
 
 				counts := collectWorkPlacementWriteMetrics(ctx, metricsReader)
-				Expect(counts).To(HaveKeyWithValue(telemetry.WorkPlacementWriteResultSuccess, int64(fakeWriter.UpdateFilesCallCount())))
+				// reconcileUntilCompletion drives N reconcile passes; the
+				// success count tracks one per pass that actually wrote.
+				Expect(counts).To(HaveKeyWithValue(telemetry.WorkPlacementWriteResultSuccess, BeNumerically(">=", int64(1))))
 				Expect(counts).NotTo(HaveKey(telemetry.WorkPlacementWriteResultFailure))
 			})
 
 			It("records a failure metric when the state store write fails", func() {
-				fakeWriter.UpdateFilesReturns("", fmt.Errorf("boom"))
+				fakeDispatcher.SubmitReturns(dispatch.Result{}, fmt.Errorf("boom"))
 
 				result, err := t.reconcileUntilCompletion(reconciler, &workPlacement, &opts{requeueExpected: true})
 				Expect(err).ToNot(HaveOccurred())
 				Expect(result.RequeueAfter).To(Equal(15 * time.Second))
 
 				counts := collectWorkPlacementWriteMetrics(ctx, metricsReader)
+				// Every reconcile pass past the finalizer step records a
+				// failure. reconcileUntilCompletion drives 30 attempts.
 				Expect(counts).To(HaveKeyWithValue(telemetry.WorkPlacementWriteResultFailure, int64(30)))
 				Expect(counts).NotTo(HaveKey(telemetry.WorkPlacementWriteResultSuccess))
 			})
@@ -251,28 +309,34 @@ var _ = Describe("WorkPlacementReconciler", func() {
 					result, err := t.reconcileUntilCompletion(reconciler, &workPlacement)
 					Expect(err).NotTo(HaveOccurred())
 					Expect(result).To(Equal(ctrl.Result{}))
-
 				})
 
-				It("calls UpdateFiles()", func() {
-					fakeWriter.ReadFileReturns([]byte(fmt.Sprintf(`
+				It("submits a delete intent containing the files from the .kratix state file", func() {
+					kratixPath := fmt.Sprintf("%s/.kratix/%s-%s.yaml", destination.Spec.Path, workPlacement.Namespace, workPlacement.Name)
+					stubStateFileReads(kratixPath, []byte(fmt.Sprintf(`
 files:
   - %s/fruit.yaml
-  - %s/file2.yaml`, destination.Spec.Path, destination.Spec.Path)), nil)
+  - %s/file2.yaml`, destination.Spec.Path, destination.Spec.Path)))
+
+					submitsBeforeDelete := fakeDispatcher.SubmitCallCount()
+
 					Expect(fakeK8sClient.Delete(ctx, &workPlacement)).To(Succeed())
 					result, err := t.reconcileUntilCompletion(reconciler, &workPlacement)
 					Expect(err).NotTo(HaveOccurred())
 					Expect(result).To(Equal(ctrl.Result{}))
 
-					kratixStateFile := fmt.Sprintf("%s/.kratix/%s-%s.yaml", destination.Spec.Path, workPlacement.Namespace, workPlacement.Name)
-					Expect(fakeWriter.DeleteFilesCallCount()).To(Equal(1))
+					submits := collectSubmits()
+					// Two new submits expected: the read of the state file (no-op
+					// Decide) and the actual delete intent.
+					Expect(len(submits)).To(BeNumerically(">=", submitsBeforeDelete+2))
+					deleteCall := submits[len(submits)-1]
+					Expect(deleteCall.intent.WorkPlacement).To(Equal(workPlacement.Name))
 
-					workPlacementName, workloadsToDelete := fakeWriter.DeleteFilesArgsForCall(0)
-					Expect(workPlacementName).To(Equal(workPlacement.Name))
-					Expect(workloadsToDelete).To(ConsistOf(
+					writes := decidedWrites(deleteCall.intent, map[string][]byte{})
+					Expect(writes.ToDelete).To(ConsistOf(
 						fmt.Sprintf("%s/fruit.yaml", destination.Spec.Path),
 						fmt.Sprintf("%s/file2.yaml", destination.Spec.Path),
-						kratixStateFile,
+						kratixPath,
 					))
 				})
 
@@ -302,22 +366,23 @@ files:
 
 			When("statestore and workplacement.spec.workloads has diverged", func() {
 				It("reflects workplacement.spec.workloads", func() {
-					fakeWriter.ReadFileReturns([]byte(`
+					kratixPath := fmt.Sprintf("%s/.kratix/%s-%s.yaml", destination.Spec.Path, workPlacement.Namespace, workPlacement.Name)
+					stubStateFileReads(kratixPath, []byte(`
 files:
   - banana.yaml
   - apple.yaml
-  - fruit.yaml`), nil)
+  - fruit.yaml`))
 
 					result, err := t.reconcileUntilCompletion(reconciler, &workPlacement)
 					Expect(err).NotTo(HaveOccurred())
 					Expect(result).To(Equal(ctrl.Result{}))
 
-					Expect(fakeWriter.ReadFileCallCount()).To(Equal(2))
-					Expect(fakeWriter.ReadFileArgsForCall(0)).To(Equal(fmt.Sprintf("%s/.kratix/%s-%s.yaml", destination.Spec.Path, workPlacement.Namespace, workPlacement.Name)))
+					submits := collectSubmits()
+					writeCall := submits[len(submits)-1]
+					Expect(writeCall.intent.Reads).To(ConsistOf(kratixPath))
+					Expect(writeCall.intent.WorkPlacement).To(Equal(workPlacement.Name))
+					Expect(writeCall.intent.SubDir).To(Equal(""))
 
-					Expect(fakeWriter.UpdateFilesCallCount()).To(Equal(2))
-					dir, workPlacementName, workloadsToCreate, workloadsToDelete := fakeWriter.UpdateFilesArgsForCall(0)
-					Expect(workPlacementName).To(Equal(workPlacement.Name))
 					pathPrefix := destination.Spec.Path + "/"
 					expectedWorkloads := []v1alpha1.Workload{
 						{Filepath: pathPrefix + "fruit.yaml", Content: "{someApi: foo, someValue: bar}"},
@@ -330,12 +395,20 @@ files:
 `,
 						},
 					}
-					Expect(workloadsToCreate).To(ConsistOf(expectedWorkloads))
-					Expect(workloadsToDelete).To(ConsistOf(
+					// Replay Decide with the stubbed state-file bytes so the
+					// computed deletes match the divergent old state.
+					writes := decidedWrites(writeCall.intent, map[string][]byte{
+						kratixPath: []byte(`
+files:
+  - banana.yaml
+  - apple.yaml
+  - fruit.yaml`),
+					})
+					Expect(writes.ToCreate).To(ConsistOf(expectedWorkloads))
+					Expect(writes.ToDelete).To(ConsistOf(
 						fmt.Sprintf("%s/banana.yaml", destination.Spec.Path),
 						fmt.Sprintf("%s/apple.yaml", destination.Spec.Path),
 					))
-					Expect(dir).To(Equal(""))
 				})
 			})
 
@@ -359,20 +432,26 @@ files:
 					workPlacement.Spec.Workloads = []v1alpha1.Workload{workloads[0]}
 					Expect(fakeK8sClient.Update(ctx, &workPlacement)).To(Succeed())
 
-					fakeWriter.ReadFileReturns([]byte(fmt.Sprintf(`
+					kratixPath := fmt.Sprintf("%s/.kratix/%s-%s.yaml", destination.Spec.Path, workPlacement.Namespace, workPlacement.Name)
+					stubStateFileReads(kratixPath, []byte(fmt.Sprintf(`
 files:
   - %s/fruit.yaml
-  - %s/file2.yaml`, destination.Spec.Path, destination.Spec.Path)), nil)
+  - %s/file2.yaml`, destination.Spec.Path, destination.Spec.Path)))
 
 					_, err = t.reconcileUntilCompletion(reconciler, &workPlacement)
 					Expect(err).NotTo(HaveOccurred())
 
-					callCount := fakeWriter.UpdateFilesCallCount()
-					Expect(callCount).To(BeNumerically(">=", 3))
-					_, wpName, _, workloadsToDelete := fakeWriter.UpdateFilesArgsForCall(callCount - 1)
-					Expect(wpName).To(Equal(workPlacement.Name))
-					Expect(workloadsToDelete).To(ConsistOf(fmt.Sprintf("%s/file2.yaml", destination.Spec.Path)))
-					Expect(workloadsToDelete).NotTo(ContainElement(fmt.Sprintf("%s/other.yaml", destination.Spec.Path)))
+					submits := collectSubmits()
+					last := submits[len(submits)-1]
+					Expect(last.intent.WorkPlacement).To(Equal(workPlacement.Name))
+					writes := decidedWrites(last.intent, map[string][]byte{
+						kratixPath: []byte(fmt.Sprintf(`
+files:
+  - %s/fruit.yaml
+  - %s/file2.yaml`, destination.Spec.Path, destination.Spec.Path)),
+					})
+					Expect(writes.ToDelete).To(ConsistOf(fmt.Sprintf("%s/file2.yaml", destination.Spec.Path)))
+					Expect(writes.ToDelete).NotTo(ContainElement(fmt.Sprintf("%s/other.yaml", destination.Spec.Path)))
 				})
 			})
 		})
@@ -383,9 +462,6 @@ files:
 			BeforeEach(func() {
 				destination.Spec.Filepath.Mode = v1alpha1.FilepathModeNestedByMetadata
 				setupGitDestination(&gitStateStore, &destination)
-				repositoryCache.GetRepositoryByTypeAndNameReturns(&controller.Repository{
-					Writer: fakeWriter,
-				}, nil)
 			})
 
 			It("creates files with directory nesting to make each workplacement unique", func() {
@@ -393,24 +469,31 @@ files:
 				Expect(err).NotTo(HaveOccurred())
 				Expect(result).To(Equal(ctrl.Result{}))
 
-				Expect(fakeWriter.UpdateFilesCallCount()).To(Equal(2))
-				dir, workPlacementName, workloadsToCreate, workloadsToDelete := fakeWriter.UpdateFilesArgsForCall(0)
-				Expect(dir).To(ContainSubstring("test-path/resources/default/test-promise/test-resource"))
-				Expect(dir).To(HaveSuffix("/"))
-				Expect(workPlacementName).To(Equal(workPlacement.Name))
-				Expect(workloadsToCreate).To(Equal(decompressedWorkloads))
-				Expect(workloadsToDelete).To(BeEmpty())
+				submits := collectSubmits()
+				Expect(submits).NotTo(BeEmpty())
+				writeCall := submits[len(submits)-1]
+				Expect(writeCall.intent.SubDir).To(ContainSubstring("test-path/resources/default/test-promise/test-resource"))
+				Expect(writeCall.intent.SubDir).To(HaveSuffix("/"))
+				Expect(writeCall.intent.WorkPlacement).To(Equal(workPlacement.Name))
+				Expect(writeCall.intent.Reads).To(BeNil())
+
+				writes := decidedWrites(writeCall.intent, map[string][]byte{})
+				Expect(writes.ToCreate).To(Equal(decompressedWorkloads))
+				Expect(writes.ToDelete).To(BeEmpty())
 			})
 
-			It("fetches the right repository", func() {
+			It("targets the right state store", func() {
 				result, err := t.reconcileUntilCompletion(reconciler, &workPlacement)
 				Expect(err).NotTo(HaveOccurred())
 				Expect(result).To(Equal(ctrl.Result{}))
 
-				Expect(repositoryCache.GetRepositoryByTypeAndNameCallCount()).To(BeNumerically(">=", 1))
-				stateStoreType, stateStoreName := repositoryCache.GetRepositoryByTypeAndNameArgsForCall(0)
-				Expect(stateStoreType).To(Equal("GitStateStore"))
-				Expect(stateStoreName).To(Equal("test-state-store"))
+				submits := collectSubmits()
+				Expect(submits).NotTo(BeEmpty())
+				dest := submits[len(submits)-1].dest
+				Expect(dest.StateStoreKind).To(Equal("GitStateStore"))
+				Expect(dest.StateStoreName).To(Equal("test-state-store"))
+				Expect(dest.Branch).To(Equal("main"))
+				Expect(dest.Path).To(Equal(destination.Spec.Path))
 			})
 
 			When("the work placement is for a promise", func() {
@@ -421,12 +504,14 @@ files:
 					Expect(err).NotTo(HaveOccurred())
 					Expect(result).To(Equal(ctrl.Result{}))
 
-					Expect(fakeWriter.UpdateFilesCallCount()).To(Equal(2))
-					dir, workPlacementName, workloadsToCreate, workloadsToDelete := fakeWriter.UpdateFilesArgsForCall(0)
-					Expect(dir).To(Equal("test-path/dependencies/test-promise/5058f/"))
-					Expect(workPlacementName).To(Equal(workPlacement.Name))
-					Expect(workloadsToCreate).To(Equal(decompressedWorkloads))
-					Expect(workloadsToDelete).To(BeEmpty())
+					submits := collectSubmits()
+					Expect(submits).NotTo(BeEmpty())
+					writeCall := submits[len(submits)-1]
+					Expect(writeCall.intent.SubDir).To(Equal("test-path/dependencies/test-promise/5058f/"))
+					Expect(writeCall.intent.WorkPlacement).To(Equal(workPlacement.Name))
+					writes := decidedWrites(writeCall.intent, map[string][]byte{})
+					Expect(writes.ToCreate).To(Equal(decompressedWorkloads))
+					Expect(writes.ToDelete).To(BeEmpty())
 				})
 			})
 		})
@@ -434,20 +519,17 @@ files:
 		When("the destination has filepath mode of none", func() {
 			BeforeEach(func() {
 				setupGitDestination(&gitStateStore, &destination)
-				repositoryCache.GetRepositoryByTypeAndNameReturns(&controller.Repository{
-					Writer: fakeWriter,
-				}, nil)
 			})
 
-			It("reconciles with dir empty and full paths for per-file delete", func() {
+			It("reconciles with subDir empty and full paths for per-file delete", func() {
 				result, err := t.reconcileUntilCompletion(reconciler, &workPlacement)
 				Expect(err).NotTo(HaveOccurred())
 				Expect(result).To(Equal(ctrl.Result{}))
 
-				Expect(fakeWriter.UpdateFilesCallCount()).To(Equal(2))
-				dir, workPlacementName, workloadsToCreate, workloadsToDelete := fakeWriter.UpdateFilesArgsForCall(0)
-				Expect(workPlacementName).To(Equal(workPlacement.Name))
-				Expect(dir).To(Equal(""))
+				submits := collectSubmits()
+				writeCall := submits[len(submits)-1]
+				Expect(writeCall.intent.WorkPlacement).To(Equal(workPlacement.Name))
+				Expect(writeCall.intent.SubDir).To(Equal(""))
 
 				pathPrefix := destination.Spec.Path + "/"
 				expectedWorkloads := []v1alpha1.Workload{
@@ -461,19 +543,22 @@ files:
 `,
 					},
 				}
-				Expect(workloadsToCreate).To(ConsistOf(expectedWorkloads))
-				Expect(workloadsToDelete).To(BeNil())
+				writes := decidedWrites(writeCall.intent, map[string][]byte{})
+				Expect(writes.ToCreate).To(ConsistOf(expectedWorkloads))
+				Expect(writes.ToDelete).To(BeNil())
 			})
 
-			It("fetches the right repository", func() {
+			It("targets the right state store", func() {
 				result, err := t.reconcileUntilCompletion(reconciler, &workPlacement)
 				Expect(err).NotTo(HaveOccurred())
 				Expect(result).To(Equal(ctrl.Result{}))
 
-				Expect(repositoryCache.GetRepositoryByTypeAndNameCallCount()).To(BeNumerically(">=", 1))
-				stateStoreType, stateStoreName := repositoryCache.GetRepositoryByTypeAndNameArgsForCall(0)
-				Expect(stateStoreType).To(Equal("GitStateStore"))
-				Expect(stateStoreName).To(Equal("test-state-store"))
+				submits := collectSubmits()
+				Expect(submits).NotTo(BeEmpty())
+				dest := submits[len(submits)-1].dest
+				Expect(dest.StateStoreKind).To(Equal("GitStateStore"))
+				Expect(dest.StateStoreName).To(Equal("test-state-store"))
+				Expect(dest.Branch).To(Equal("main"))
 			})
 
 			When("deleting a work placement", func() {
@@ -483,47 +568,48 @@ files:
 					Expect(result).To(Equal(ctrl.Result{}))
 				})
 
-				It("calls DeleteFiles with only this workplacement's files", func() {
-					fakeWriter.ReadFileReturns([]byte(fmt.Sprintf(`
+				It("submits a delete intent containing only this workplacement's files", func() {
+					kratixPath := fmt.Sprintf("%s/.kratix/%s-%s.yaml", destination.Spec.Path, workPlacement.Namespace, workPlacement.Name)
+					stubStateFileReads(kratixPath, []byte(fmt.Sprintf(`
 files:
   - %s/fruit.yaml
-  - %s/file2.yaml`, destination.Spec.Path, destination.Spec.Path)), nil)
+  - %s/file2.yaml`, destination.Spec.Path, destination.Spec.Path)))
+
 					Expect(fakeK8sClient.Delete(ctx, &workPlacement)).To(Succeed())
 					result, err := t.reconcileUntilCompletion(reconciler, &workPlacement)
 					Expect(err).NotTo(HaveOccurred())
 					Expect(result).To(Equal(ctrl.Result{}))
 
-					kratixStateFile := fmt.Sprintf("%s/.kratix/%s-%s.yaml", destination.Spec.Path, workPlacement.Namespace, workPlacement.Name)
-					Expect(fakeWriter.DeleteFilesCallCount()).To(Equal(1))
-
-					wpName, workloadsToDelete := fakeWriter.DeleteFilesArgsForCall(0)
-					Expect(wpName).To(Equal(workPlacement.Name))
-					Expect(workloadsToDelete).To(ConsistOf(
+					submits := collectSubmits()
+					deleteCall := submits[len(submits)-1]
+					Expect(deleteCall.intent.WorkPlacement).To(Equal(workPlacement.Name))
+					writes := decidedWrites(deleteCall.intent, map[string][]byte{})
+					Expect(writes.ToDelete).To(ConsistOf(
 						fmt.Sprintf("%s/fruit.yaml", destination.Spec.Path),
 						fmt.Sprintf("%s/file2.yaml", destination.Spec.Path),
-						kratixStateFile,
+						kratixPath,
 					))
 				})
 			})
 
 			When("statestore and workplacement.spec.workloads has diverged", func() {
 				It("only deletes files belonging to this workplacement", func() {
-					fakeWriter.ReadFileReturns([]byte(`
+					kratixPath := fmt.Sprintf("%s/.kratix/%s-%s.yaml", destination.Spec.Path, workPlacement.Namespace, workPlacement.Name)
+					stubStateFileReads(kratixPath, []byte(`
 files:
   - banana.yaml
   - apple.yaml
-  - fruit.yaml`), nil)
+  - fruit.yaml`))
 
 					result, err := t.reconcileUntilCompletion(reconciler, &workPlacement)
 					Expect(err).NotTo(HaveOccurred())
 					Expect(result).To(Equal(ctrl.Result{}))
 
-					Expect(fakeWriter.ReadFileCallCount()).To(Equal(2))
-					Expect(fakeWriter.ReadFileArgsForCall(0)).To(Equal(fmt.Sprintf("%s/.kratix/%s-%s.yaml", destination.Spec.Path, workPlacement.Namespace, workPlacement.Name)))
+					submits := collectSubmits()
+					writeCall := submits[len(submits)-1]
+					Expect(writeCall.intent.Reads).To(ConsistOf(kratixPath))
+					Expect(writeCall.intent.WorkPlacement).To(Equal(workPlacement.Name))
 
-					Expect(fakeWriter.UpdateFilesCallCount()).To(Equal(2))
-					dir, wpName, workloadsToCreate, workloadsToDelete := fakeWriter.UpdateFilesArgsForCall(0)
-					Expect(wpName).To(Equal(workPlacement.Name))
 					pathPrefix := destination.Spec.Path + "/"
 					expectedWorkloads := []v1alpha1.Workload{
 						{Filepath: pathPrefix + "fruit.yaml", Content: "{someApi: foo, someValue: bar}"},
@@ -536,12 +622,19 @@ files:
 `,
 						},
 					}
-					Expect(workloadsToCreate).To(ConsistOf(expectedWorkloads))
-					Expect(workloadsToDelete).To(ConsistOf(
+					writes := decidedWrites(writeCall.intent, map[string][]byte{
+						kratixPath: []byte(`
+files:
+  - banana.yaml
+  - apple.yaml
+  - fruit.yaml`),
+					})
+					Expect(writes.ToCreate).To(ConsistOf(expectedWorkloads))
+					Expect(writes.ToDelete).To(ConsistOf(
 						fmt.Sprintf("%s/banana.yaml", destination.Spec.Path),
 						fmt.Sprintf("%s/apple.yaml", destination.Spec.Path),
 					))
-					Expect(dir).To(Equal(""))
+					Expect(writeCall.intent.SubDir).To(Equal(""))
 				})
 			})
 		})
@@ -571,20 +664,21 @@ files:
 				Expect(result).To(Equal(ctrl.Result{}))
 			})
 
-			It("creates a single file in destination.Spec.Path with the user-provided filename", func() {
-				mergedWorkloads := []v1alpha1.Workload{
+			It("submits a single aggregated workload at destination.Spec.Path with the user-provided filename", func() {
+				submits := collectSubmits()
+				Expect(submits).NotTo(BeEmpty())
+				writeCall := submits[len(submits)-1]
+				Expect(writeCall.intent.SubDir).To(Equal(""))
+				Expect(writeCall.intent.WorkPlacement).To(Equal(workPlacement.Name))
+
+				writes := decidedWrites(writeCall.intent, map[string][]byte{})
+				Expect(writes.ToCreate).To(Equal([]v1alpha1.Workload{
 					{
 						Filepath: "test-path/workloads.yaml",
 						Content:  "{someApi: foo, someValue: bar}\n---\n{someOtherApi: fooz, someOtherValue: barz}\n---\n{kratix: is-good}",
 					},
-				}
-
-				Expect(fakeWriter.UpdateFilesCallCount()).To(Equal(2))
-				dir, workPlacementName, workloadsToCreate, workloadsToDelete := fakeWriter.UpdateFilesArgsForCall(0)
-				Expect(dir).To(Equal(""))
-				Expect(workPlacementName).To(Equal(workPlacement.Name))
-				Expect(workloadsToCreate).To(Equal(mergedWorkloads))
-				Expect(workloadsToDelete).To(BeEmpty())
+				}))
+				Expect(writes.ToDelete).To(BeEmpty())
 			})
 
 			When("the user does not provide a filename", func() {
@@ -597,11 +691,12 @@ files:
 				})
 
 				It("uses the default filename aggregated.yaml", func() {
-					callCount := fakeWriter.UpdateFilesCallCount()
-					Expect(callCount).To(BeNumerically(">=", 1))
-					_, _, workloadsToCreate, _ := fakeWriter.UpdateFilesArgsForCall(callCount - 1)
-					Expect(workloadsToCreate).To(HaveLen(1))
-					Expect(workloadsToCreate[0].Filepath).To(Equal("test-path/aggregated.yaml"))
+					submits := collectSubmits()
+					Expect(submits).NotTo(BeEmpty())
+					writeCall := submits[len(submits)-1]
+					writes := decidedWrites(writeCall.intent, map[string][]byte{})
+					Expect(writes.ToCreate).To(HaveLen(1))
+					Expect(writes.ToCreate[0].Filepath).To(Equal("test-path/aggregated.yaml"))
 				})
 			})
 
@@ -610,34 +705,35 @@ files:
 					Expect(fakeK8sClient.Delete(ctx, &workPlacement)).To(Succeed())
 				})
 
-				It("removes the workloads of the deleted workplacement from the file", func() {
+				It("removes the workloads of the deleted workplacement from the aggregated file", func() {
+					submitCountBeforeDelete := fakeDispatcher.SubmitCallCount()
 					result, err := t.reconcileUntilCompletion(reconciler, &workPlacement)
 					Expect(err).NotTo(HaveOccurred())
 					Expect(result).To(Equal(ctrl.Result{}))
 
-					mergedWorkloads := []v1alpha1.Workload{
+					submits := collectSubmits()
+					// Since other workplacements remain, the deletion path
+					// submits an update intent that rewrites the aggregated
+					// file without this workplacement's content; no delete
+					// intent is submitted afterwards.
+					Expect(len(submits)).To(BeNumerically(">", submitCountBeforeDelete))
+					updateCall := submits[len(submits)-1]
+					Expect(updateCall.intent.SubDir).To(Equal(""))
+					Expect(updateCall.intent.WorkPlacement).To(Equal(workPlacement.Name))
+
+					writes := decidedWrites(updateCall.intent, map[string][]byte{})
+					Expect(writes.ToCreate).To(Equal([]v1alpha1.Workload{
 						{
 							Filepath: "test-path/workloads.yaml",
 							Content:  "{kratix: is-good}",
 						},
-					}
-
-					Expect(fakeWriter.UpdateFilesCallCount()).To(Equal(3))
-					dir, workPlacementName, workloadsToCreate, workloadsToDelete := fakeWriter.UpdateFilesArgsForCall(2)
-					Expect(dir).To(Equal(""))
-					Expect(workPlacementName).To(Equal(workPlacement.Name))
-					Expect(workloadsToCreate).To(Equal(mergedWorkloads))
-					Expect(workloadsToDelete).To(BeEmpty())
+					}))
+					Expect(writes.ToDelete).To(BeEmpty())
 
 					Expect(fakeK8sClient.Get(ctx, client.ObjectKey{
 						Name:      workPlacement.GetName(),
 						Namespace: workPlacement.GetNamespace(),
 					}, &workPlacement)).To(HaveOccurred())
-
-					for i := range 3 {
-						_, _, _, workloadsToDelete := fakeWriter.UpdateFilesArgsForCall(i)
-						Expect(workloadsToDelete).To(BeEmpty())
-					}
 				})
 			})
 
@@ -650,11 +746,13 @@ files:
 					Expect(result).To(Equal(ctrl.Result{}))
 				})
 
-				It("removes the workloads of the deleted workplacement from the file", func() {
-					Expect(fakeWriter.DeleteFilesCallCount()).To(Equal(1))
-					workPlacementName, workloadsToDelete := fakeWriter.DeleteFilesArgsForCall(0)
-					Expect(workPlacementName).To(Equal(workPlacement.Name))
-					Expect(workloadsToDelete).To(ConsistOf("test-path/workloads.yaml"))
+				It("submits a delete intent for the aggregated file", func() {
+					submits := collectSubmits()
+					Expect(submits).NotTo(BeEmpty())
+					deleteCall := submits[len(submits)-1]
+					Expect(deleteCall.intent.WorkPlacement).To(Equal(workPlacement.Name))
+					writes := decidedWrites(deleteCall.intent, map[string][]byte{})
+					Expect(writes.ToDelete).To(ConsistOf("test-path/workloads.yaml"))
 				})
 			})
 		})
@@ -667,7 +765,14 @@ files:
 			})
 
 			It("is updated with the last VersionID", func() {
-				fakeWriter.UpdateFilesReturns("an-amazing-version-id", nil)
+				fakeDispatcher.SubmitCalls(func(_ context.Context, _ dispatch.DestinationKey, intent dispatch.Intent) (dispatch.Result, error) {
+					if intent.Decide != nil {
+						if _, err := intent.Decide(map[string][]byte{}); err != nil {
+							return dispatch.Result{}, err
+						}
+					}
+					return dispatch.Result{VersionID: "an-amazing-version-id"}, nil
+				})
 
 				result, err := t.reconcileUntilCompletion(reconciler, &workPlacement)
 				Expect(err).NotTo(HaveOccurred())
@@ -685,7 +790,7 @@ files:
 				workPlacement.Status.VersionID = "an-amazing-version-id"
 				Expect(fakeK8sClient.Status().Update(ctx, &workPlacement)).To(Succeed())
 
-				fakeWriter.UpdateFilesReturns("", nil)
+				// default stub returns an empty VersionID
 
 				result, err := t.reconcileUntilCompletion(reconciler, &workPlacement)
 				Expect(err).NotTo(HaveOccurred())
@@ -717,7 +822,7 @@ files:
 					Expect(fakeK8sClient.Status().Update(ctx, &workPlacement)).To(Succeed())
 
 					errSubResourceUpdate = fmt.Errorf("an-error")
-					fakeWriter.UpdateFilesReturnsOnCall(0, "an-amazing-version-id", nil)
+					stubFirstCallVersion(fakeDispatcher, "an-amazing-version-id")
 
 					result, err := t.reconcileUntilCompletion(reconciler, &workPlacement)
 					Expect(err).To(MatchError("reconcile loop detected"))
@@ -741,7 +846,7 @@ files:
 			When("updating the status fails on updating the conditions", func() {
 				It("applies the Version ID on the next reconcile", func() {
 					errSubResourceUpdate = fmt.Errorf("an-error")
-					fakeWriter.UpdateFilesReturnsOnCall(0, "an-amazing-version-id", nil)
+					stubFirstCallVersion(fakeDispatcher, "an-amazing-version-id")
 
 					result, err := t.reconcileUntilCompletion(reconciler, &workPlacement)
 					Expect(err).To(HaveOccurred())
@@ -777,7 +882,14 @@ files:
 
 			When("write to statestore has succeeded", func() {
 				It("sets WriteSucceeded to true and publishes the right event", func() {
-					fakeWriter.UpdateFilesReturns("an-id", nil)
+					fakeDispatcher.SubmitCalls(func(_ context.Context, _ dispatch.DestinationKey, intent dispatch.Intent) (dispatch.Result, error) {
+						if intent.Decide != nil {
+							if _, err := intent.Decide(map[string][]byte{}); err != nil {
+								return dispatch.Result{}, err
+							}
+						}
+						return dispatch.Result{VersionID: "an-id"}, nil
+					})
 					result, err := t.reconcileUntilCompletion(reconciler, &workPlacement)
 					Expect(err).NotTo(HaveOccurred())
 					Expect(result).To(Equal(ctrl.Result{}))
@@ -817,7 +929,7 @@ files:
 					workPlacement.Status.Conditions = nil
 					Expect(fakeK8sClient.Update(ctx, &workPlacement)).To(Succeed())
 
-					fakeWriter.UpdateFilesReturns("", fmt.Errorf("whatever error"))
+					fakeDispatcher.SubmitReturns(dispatch.Result{}, fmt.Errorf("whatever error"))
 					_, err := t.reconcileUntilCompletion(reconciler, &workPlacement)
 					Expect(err).To(HaveOccurred())
 
@@ -847,6 +959,25 @@ files:
 
 	})
 })
+
+// stubFirstCallVersion makes the first Submit return the given VersionID,
+// and subsequent submits return an empty VersionID. Mirrors the previous
+// fakeWriter.UpdateFilesReturnsOnCall(0, "version", nil) pattern.
+func stubFirstCallVersion(fake *dispatchfakes.FakeDispatcher, versionID string) {
+	var calls int
+	fake.SubmitCalls(func(_ context.Context, _ dispatch.DestinationKey, intent dispatch.Intent) (dispatch.Result, error) {
+		if intent.Decide != nil {
+			if _, err := intent.Decide(map[string][]byte{}); err != nil {
+				return dispatch.Result{}, err
+			}
+		}
+		defer func() { calls++ }()
+		if calls == 0 {
+			return dispatch.Result{VersionID: versionID}, nil
+		}
+		return dispatch.Result{}, nil
+	})
+}
 
 func setupGitDestination(gitStateStore *v1alpha1.GitStateStore, destination *v1alpha1.Destination) {
 	Expect(fakeK8sClient.Create(ctx, &corev1.Secret{

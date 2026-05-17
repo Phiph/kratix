@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -63,6 +64,7 @@ import (
 	_ "github.com/syntasso/kratix/internal/metrics" // register kratix-custom Prometheus instruments
 	"github.com/syntasso/kratix/internal/telemetry"
 	"github.com/syntasso/kratix/lib/fetchers"
+	"github.com/syntasso/kratix/lib/writers/dispatch"
 	//+kubebuilder:scaffold:imports
 )
 
@@ -310,7 +312,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	repositoryCache := controller.NewRepositoryCache()
+	dispatcher := dispatch.NewDispatcher(dispatch.DispatcherConfig{
+		Logger:        setupLog.WithName("dispatcher"),
+		NewGitBackend: dispatch.NewGitBackend,
+		NewS3Backend:  dispatch.NewS3Backend,
+	})
 
 	scheduler := controller.Scheduler{
 		Client:        mgr.GetClient(),
@@ -360,11 +366,11 @@ func main() {
 	}
 
 	if err = (&controller.DestinationReconciler{
-		Client:          mgr.GetClient(),
-		Scheduler:       &scheduler,
-		Log:             ctrl.Log.WithName("controllers").WithName("DestinationController"),
-		EventRecorder:   mgr.GetEventRecorderFor("DestinationController"),
-		RepositoryCache: repositoryCache,
+		Client:        mgr.GetClient(),
+		Scheduler:     &scheduler,
+		Log:           ctrl.Log.WithName("controllers").WithName("DestinationController"),
+		EventRecorder: mgr.GetEventRecorderFor("DestinationController"),
+		Dispatcher:    dispatcher,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Destination")
 		os.Exit(1)
@@ -402,32 +408,32 @@ func main() {
 		os.Exit(1)
 	}
 	if err = (&controller.BucketStateStoreReconciler{
-		Client:          mgr.GetClient(),
-		Scheme:          mgr.GetScheme(),
-		Log:             ctrl.Log.WithName("controllers").WithName("BucketStateStoreController"),
-		EventRecorder:   mgr.GetEventRecorderFor("BucketStateStoreController"),
-		RepositoryCache: repositoryCache,
+		Client:        mgr.GetClient(),
+		Scheme:        mgr.GetScheme(),
+		Log:           ctrl.Log.WithName("controllers").WithName("BucketStateStoreController"),
+		EventRecorder: mgr.GetEventRecorderFor("BucketStateStoreController"),
+		Dispatcher:    dispatcher,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "BucketStateStore")
 		os.Exit(1)
 	}
 
 	if err := (&controller.GitStateStoreReconciler{
-		Client:          mgr.GetClient(),
-		Scheme:          mgr.GetScheme(),
-		Log:             ctrl.Log.WithName("controllers").WithName("GitStateStore"),
-		EventRecorder:   mgr.GetEventRecorderFor("GitStateStoreController"),
-		RepositoryCache: repositoryCache,
+		Client:        mgr.GetClient(),
+		Scheme:        mgr.GetScheme(),
+		Log:           ctrl.Log.WithName("controllers").WithName("GitStateStore"),
+		EventRecorder: mgr.GetEventRecorderFor("GitStateStoreController"),
+		Dispatcher:    dispatcher,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "GitStateStore")
 		os.Exit(1)
 	}
 	if err = (&controller.WorkPlacementReconciler{
-		Client:          mgr.GetClient(),
-		Log:             ctrl.Log.WithName("controllers").WithName("WorkPlacementController"),
-		VersionCache:    make(map[string]string),
-		RepositoryCache: repositoryCache,
-		EventRecorder:   mgr.GetEventRecorderFor("WorkPlacementController"),
+		Client:        mgr.GetClient(),
+		Log:           ctrl.Log.WithName("controllers").WithName("WorkPlacementController"),
+		VersionCache:  &sync.Map{},
+		Dispatcher:    dispatcher,
+		EventRecorder: mgr.GetEventRecorderFor("WorkPlacementController"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "WorkPlacement")
 		os.Exit(1)
@@ -479,6 +485,14 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+
+	setupLog.Info("shutting down dispatcher")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := dispatcher.Shutdown(shutdownCtx); err != nil {
+		setupLog.Error(err, "dispatcher shutdown did not complete cleanly")
+	}
+
 	setupLog.Info("shutting down")
 	os.Exit(0)
 }

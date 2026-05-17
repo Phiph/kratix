@@ -33,6 +33,7 @@ type gitAuthor struct {
 	Email string
 }
 
+//counterfeiter:generate . GitExecutor
 type GitExecutor interface {
 	Add(files ...string) (string, error)
 	Clone(branch string) (repoDir string, err error)
@@ -46,7 +47,8 @@ type GitExecutor interface {
 	RemoveFile(file string) error
 }
 
-type batchFileRemover interface {
+//counterfeiter:generate . BatchFileRemover
+type BatchFileRemover interface {
 	RemoveFiles(files ...string) error
 }
 
@@ -69,8 +71,9 @@ func NewGitWriter(logger logr.Logger, stateStoreSpec v1alpha1.GitStateStoreSpec,
 			// NOTE: intentionally allowing insecure connections,
 			// due to pre-existing setting:
 			// https://github.com/syntasso/kratix/blob/59231e70b0a4a428067e3b909fd2e9dc07110997/lib/writers/git.go#L373
-			Insecure: true,
-			Log:      logger,
+			Insecure:            true,
+			Log:                 logger,
+			AllowFileURLForTest: os.Getenv("KRATIX_GIT_ALLOW_FILE_URL_FOR_TEST") == "1",
 		})
 	if err != nil {
 		return nil, fmt.Errorf("could not create git native client: %w", err)
@@ -140,7 +143,7 @@ func (g *GitWriter) update(subDir, workPlacementName string, workloadsToCreate [
 				"path of file to write is not located within the git repository",
 				"absolutePath",
 				absoluteFilePath, "tmpDir", localDir)
-			return "", nil //We don't want to retry as this isn't a recoverable error. Log error and return nil.
+			return "", fmt.Errorf("%w: %s", ErrPathOutsideRepo, file.Filepath)
 		}
 
 		if err := os.MkdirAll(filepath.Dir(absoluteFilePath), 0700); err != nil {
@@ -200,7 +203,7 @@ func (g *GitWriter) deleteExistingFiles(removeDirectory bool, dir string, worklo
 			return nil
 		}
 
-		if remover, ok := g.Runner.(batchFileRemover); ok {
+		if remover, ok := g.Runner.(BatchFileRemover); ok {
 			if err := remover.RemoveFiles(filesToRemove...); err != nil {
 				logging.Error(logger, err, "could not remove files from worktree")
 				return err

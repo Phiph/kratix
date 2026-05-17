@@ -21,7 +21,6 @@ import (
 	"errors"
 	"time"
 
-	"github.com/go-logr/logr"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
@@ -34,8 +33,8 @@ import (
 
 	v1alpha1 "github.com/syntasso/kratix/api/v1alpha1"
 	"github.com/syntasso/kratix/internal/controller"
-	"github.com/syntasso/kratix/lib/writers"
-	"github.com/syntasso/kratix/lib/writers/writersfakes"
+	"github.com/syntasso/kratix/lib/writers/dispatch"
+	"github.com/syntasso/kratix/lib/writers/dispatch/dispatchfakes"
 )
 
 var _ = Describe("BucketStateStore Controller", func() {
@@ -43,13 +42,12 @@ var _ = Describe("BucketStateStore Controller", func() {
 		bucketStateStore         *v1alpha1.BucketStateStore
 		updatedBucketStateStore  *v1alpha1.BucketStateStore
 		reconciler               *controller.BucketStateStoreReconciler
-		fakeWriter               *writersfakes.FakeStateStoreWriter
+		fakeDispatcher           *dispatchfakes.FakeDispatcher
 		eventRecorder            *record.FakeRecorder
 		secret                   *corev1.Secret
 		ctx                      context.Context
 		testBucketStateStoreName types.NamespacedName
 		secretName               string
-		repositoryCache          controller.RepositoryCache
 	)
 
 	BeforeEach(func() {
@@ -60,24 +58,19 @@ var _ = Describe("BucketStateStore Controller", func() {
 		}
 
 		secretName = "store-secret"
-		repositoryCache = controller.NewRepositoryCache()
 		eventRecorder = record.NewFakeRecorder(1024)
 
-		fakeWriter = &writersfakes.FakeStateStoreWriter{}
-		controller.SetNewS3Writer(
-			func(l logr.Logger, s v1alpha1.BucketStateStoreSpec, d string, c map[string][]byte) (writers.StateStoreWriter, error) {
-				return fakeWriter, nil
-			},
-		)
-		fakeWriter.UpdateFilesReturns("", nil)
-		fakeWriter.ValidatePermissionsReturns(nil)
+		fakeDispatcher = &dispatchfakes.FakeDispatcher{}
+		fakeDispatcher.RegisterS3DestinationReturns(nil)
+		fakeDispatcher.ValidateReturns(nil)
+		fakeDispatcher.CleanupReturns(nil)
 
 		reconciler = &controller.BucketStateStoreReconciler{
-			Client:          fakeK8sClient,
-			Scheme:          scheme.Scheme,
-			Log:             ctrl.Log.WithName("controllers").WithName("BucketStateStore"),
-			EventRecorder:   eventRecorder,
-			RepositoryCache: repositoryCache,
+			Client:        fakeK8sClient,
+			Scheme:        scheme.Scheme,
+			Log:           ctrl.Log.WithName("controllers").WithName("BucketStateStore"),
+			EventRecorder: eventRecorder,
+			Dispatcher:    fakeDispatcher,
 		}
 
 		bucketStateStore = &v1alpha1.BucketStateStore{
@@ -140,8 +133,17 @@ var _ = Describe("BucketStateStore Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result).To(Equal(ctrl.Result{}))
 
+			By("registering the destination with the dispatcher", func() {
+				Expect(fakeDispatcher.RegisterS3DestinationCallCount()).To(Equal(2))
+				key, _, _ := fakeDispatcher.RegisterS3DestinationArgsForCall(0)
+				Expect(key).To(Equal(dispatch.DestinationKey{
+					StateStoreKind: "BucketStateStore",
+					StateStoreName: "default-store",
+				}))
+			})
+
 			By("validating permissions on the state store", func() {
-				Expect(fakeWriter.ValidatePermissionsCallCount()).To(Equal(2))
+				Expect(fakeDispatcher.ValidateCallCount()).To(Equal(2))
 			})
 
 			By("updating the status to say the state store is ready", func() {
@@ -161,16 +163,12 @@ var _ = Describe("BucketStateStore Controller", func() {
 			})
 		})
 
-		When("the writer fails to initialise", func() {
+		When("registering the destination fails", func() {
 			BeforeEach(func() {
 				bucketStateStore.Status.Status = controller.StatusReady
 				Expect(fakeK8sClient.Status().Update(ctx, bucketStateStore)).To(Succeed())
 
-				controller.SetNewS3Writer(
-					func(l logr.Logger, s v1alpha1.BucketStateStoreSpec, d string, c map[string][]byte) (writers.StateStoreWriter, error) {
-						return fakeWriter, errors.New("writer-create-error")
-					},
-				)
+				fakeDispatcher.RegisterS3DestinationReturns(errors.New("unable to create bucket writer: writer-create-error"))
 
 				result, err = t.reconcileUntilCompletion(reconciler, bucketStateStore, &opts{requeueExpected: true})
 			})
@@ -195,9 +193,9 @@ var _ = Describe("BucketStateStore Controller", func() {
 			})
 		})
 
-		When("the writer fails to validate permissions", func() {
+		When("the dispatcher fails to validate permissions", func() {
 			BeforeEach(func() {
-				fakeWriter.ValidatePermissionsReturns(errors.New("ARGH!"))
+				fakeDispatcher.ValidateReturns(errors.New("ARGH!"))
 
 				bucketStateStore.Status.Status = controller.StatusReady
 				Expect(fakeK8sClient.Status().Update(ctx, bucketStateStore)).To(Succeed())

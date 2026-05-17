@@ -3,7 +3,6 @@
 //
 // Modifications Copyright 2026 Syntasso
 
-//go:generate mockgen -source=git.go -destination=mocks/mock_client.go -package=mocks
 package git
 
 import (
@@ -52,19 +51,27 @@ type GitClientRequest struct {
 	NoProxy    string
 	Opts       []ClientOpts
 	Log        logr.Logger
+
+	// AllowFileURLForTest disables the URL-format validation (HTTPS or SSH).
+	// ONLY for tests; never set this in production. When true, the URL may
+	// be any string and is passed directly to git, which natively supports
+	// filesystem paths (a "file://" URL or plain path).
+	AllowFileURLForTest bool
 }
 
 func NewGitClient(req GitClientRequest) (*nativeGitClient, error) {
 	var accessToken string
 
-	switch req.Auth.Creds.(type) {
-	case SSHCreds:
-		if ok, _ := IsSSHURL(req.RawRepoURL); !ok {
-			return nil, fmt.Errorf("invalid URL for SSH auth method: %s", req.RawRepoURL)
-		}
-	default:
-		if !IsHTTPSURL(req.RawRepoURL) {
-			return nil, fmt.Errorf("invalid URL for HTTPS auth method: %s", req.RawRepoURL)
+	if !req.AllowFileURLForTest {
+		switch req.Auth.Creds.(type) {
+		case SSHCreds:
+			if ok, _ := IsSSHURL(req.RawRepoURL); !ok {
+				return nil, fmt.Errorf("invalid URL for SSH auth method: %s", req.RawRepoURL)
+			}
+		default:
+			if !IsHTTPSURL(req.RawRepoURL) {
+				return nil, fmt.Errorf("invalid URL for HTTPS auth method: %s", req.RawRepoURL)
+			}
 		}
 	}
 
@@ -340,8 +347,12 @@ func (m *nativeGitClient) RemoveDirectory(dir string) error {
 	return nil
 }
 
+// RemoveFile removes a single tracked path from the worktree and index.
+// Uses `git rm -r` so the same call works for files and directories — the
+// caller may not always know which it is (e.g. a workload Filepath that
+// happens to denote a subtree).
 func (m *nativeGitClient) RemoveFile(file string) error {
-	args := []string{"rm", "--", file}
+	args := []string{"rm", "-r", "--", file}
 	ctx := context.Background()
 	_, err := m.runCmd(ctx, args...)
 	if err != nil {
@@ -351,13 +362,15 @@ func (m *nativeGitClient) RemoveFile(file string) error {
 	return nil
 }
 
+// RemoveFiles removes multiple tracked paths in one git invocation. Uses
+// `git rm -r` so the same call handles files and directories transparently.
 func (m *nativeGitClient) RemoveFiles(files ...string) error {
 	if len(files) == 0 {
 		return nil
 	}
 
 	ctx := context.Background()
-	args := append([]string{"rm", "--"}, files...)
+	args := append([]string{"rm", "-r", "--"}, files...)
 	_, err := m.runCmd(ctx, args...)
 	if err != nil {
 		logging.Error(m.log, err, "could not remove files")

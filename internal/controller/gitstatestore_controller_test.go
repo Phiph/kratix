@@ -21,7 +21,6 @@ import (
 	"errors"
 	"time"
 
-	"github.com/go-logr/logr"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
@@ -34,8 +33,8 @@ import (
 
 	v1alpha1 "github.com/syntasso/kratix/api/v1alpha1"
 	"github.com/syntasso/kratix/internal/controller"
-	"github.com/syntasso/kratix/lib/writers"
-	"github.com/syntasso/kratix/lib/writers/writersfakes"
+	"github.com/syntasso/kratix/lib/writers/dispatch"
+	"github.com/syntasso/kratix/lib/writers/dispatch/dispatchfakes"
 )
 
 var _ = Describe("GitStateStore Controller", func() {
@@ -43,7 +42,7 @@ var _ = Describe("GitStateStore Controller", func() {
 		gitStateStore         *v1alpha1.GitStateStore
 		updatedGitStateStore  *v1alpha1.GitStateStore
 		reconciler            *controller.GitStateStoreReconciler
-		fakeWriter            *writersfakes.FakeStateStoreWriter
+		fakeDispatcher        *dispatchfakes.FakeDispatcher
 		eventRecorder         *record.FakeRecorder
 		secret                *corev1.Secret
 		ctx                   context.Context
@@ -62,21 +61,17 @@ var _ = Describe("GitStateStore Controller", func() {
 
 		eventRecorder = record.NewFakeRecorder(1024)
 
-		fakeWriter = &writersfakes.FakeStateStoreWriter{}
-		controller.SetNewGitWriter(
-			func(l logr.Logger, s v1alpha1.GitStateStoreSpec, d string, c map[string][]byte) (writers.StateStoreWriter, error) {
-				return fakeWriter, nil
-			},
-		)
-		fakeWriter.UpdateFilesReturns("", nil)
-		fakeWriter.ValidatePermissionsReturns(nil)
+		fakeDispatcher = &dispatchfakes.FakeDispatcher{}
+		fakeDispatcher.RegisterGitDestinationReturns(nil)
+		fakeDispatcher.ValidateReturns(nil)
+		fakeDispatcher.CleanupReturns(nil)
 
 		reconciler = &controller.GitStateStoreReconciler{
-			Client:          fakeK8sClient,
-			Scheme:          scheme.Scheme,
-			Log:             ctrl.Log.WithName("controllers").WithName("GitStateStore"),
-			EventRecorder:   eventRecorder,
-			RepositoryCache: controller.NewRepositoryCache(),
+			Client:        fakeK8sClient,
+			Scheme:        scheme.Scheme,
+			Log:           ctrl.Log.WithName("controllers").WithName("GitStateStore"),
+			EventRecorder: eventRecorder,
+			Dispatcher:    fakeDispatcher,
 		}
 
 		gitStateStore = &v1alpha1.GitStateStore{
@@ -138,8 +133,17 @@ var _ = Describe("GitStateStore Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result).To(Equal(ctrl.Result{}))
 
+			By("registering the destination with the dispatcher", func() {
+				Expect(fakeDispatcher.RegisterGitDestinationCallCount()).To(Equal(2))
+				key, _, _ := fakeDispatcher.RegisterGitDestinationArgsForCall(0)
+				Expect(key).To(Equal(dispatch.DestinationKey{
+					StateStoreKind: "GitStateStore",
+					StateStoreName: "default-store",
+				}))
+			})
+
 			By("validating permissions on the state store", func() {
-				Expect(fakeWriter.ValidatePermissionsCallCount()).To(Equal(2))
+				Expect(fakeDispatcher.ValidateCallCount()).To(Equal(2))
 			})
 
 			By("updating the status to say the state store is ready", func() {
@@ -159,16 +163,12 @@ var _ = Describe("GitStateStore Controller", func() {
 			})
 		})
 
-		When("the writer fails to initialise", func() {
+		When("registering the destination fails", func() {
 			BeforeEach(func() {
 				gitStateStore.Status.Status = controller.StatusReady
 				Expect(fakeK8sClient.Status().Update(ctx, gitStateStore)).To(Succeed())
 
-				controller.SetNewGitWriter(
-					func(l logr.Logger, s v1alpha1.GitStateStoreSpec, d string, c map[string][]byte) (writers.StateStoreWriter, error) {
-						return fakeWriter, errors.New("writer-create-error")
-					},
-				)
+				fakeDispatcher.RegisterGitDestinationReturns(errors.New("unable to create git writer: writer-create-error"))
 
 				result, err = t.reconcileUntilCompletion(reconciler, gitStateStore, &opts{requeueExpected: true})
 			})
@@ -193,9 +193,9 @@ var _ = Describe("GitStateStore Controller", func() {
 			})
 		})
 
-		When("the writer fails to validate permissions", func() {
+		When("the dispatcher fails to validate permissions", func() {
 			BeforeEach(func() {
-				fakeWriter.ValidatePermissionsReturns(errors.New("ARGH!"))
+				fakeDispatcher.ValidateReturns(errors.New("ARGH!"))
 
 				gitStateStore.Status.Status = controller.StatusReady
 				Expect(fakeK8sClient.Status().Update(ctx, gitStateStore)).To(Succeed())
