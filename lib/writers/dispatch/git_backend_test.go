@@ -40,7 +40,7 @@ var _ = Describe("GitBackend integration", func() {
 
 		spec = v1alpha1.GitStateStoreSpec{
 			StateStoreCoreFields: v1alpha1.StateStoreCoreFields{
-				Path:      "p",
+				Path:      "state",
 				SecretRef: &corev1.SecretReference{Namespace: "default", Name: "s"},
 			},
 			AuthMethod: v1alpha1.BasicAuthMethod,
@@ -56,7 +56,7 @@ var _ = Describe("GitBackend integration", func() {
 			StateStoreKind: "GitStateStore",
 			StateStoreName: "g",
 			Branch:         "main",
-			Path:           "p",
+			Path:           "dest",
 		}
 	})
 
@@ -66,7 +66,7 @@ var _ = Describe("GitBackend integration", func() {
 		defer b.Close()
 
 		// README.md was seeded at the bare-repo root; GitBackend clones into the
-		// destination's Path ("p"), so README isn't visible at the relative path
+		// destination's Path ("dest"), so README isn't visible at the relative path
 		// "README.md". Read a missing file: result map should NOT have that key.
 		got, err := b.Read(context.Background(), []string{"nope.yaml"})
 		Expect(err).NotTo(HaveOccurred())
@@ -91,10 +91,9 @@ var _ = Describe("GitBackend integration", func() {
 
 		// Verify by cloning the bare repo to a check-out dir.
 		// The repo layout is <stateStore.Path>/<dest.Path>/<subDir>/<filepath>.
-		// Both spec.Path and dest.Path are "p", so the file lives at p/p/sub/a.yaml.
 		checkout := GinkgoT().TempDir()
 		Expect(exec.Command("git", "clone", "-b", "main", bareRepo, checkout).Run()).To(Succeed())
-		body, err := os.ReadFile(filepath.Join(checkout, "p", "p", "sub", "a.yaml"))
+		body, err := os.ReadFile(filepath.Join(checkout, "state", "dest", "sub", "a.yaml"))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(string(body)).To(Equal("a-content"))
 	})
