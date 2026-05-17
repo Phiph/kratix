@@ -12,6 +12,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	"github.com/syntasso/kratix/api/v1alpha1"
+	"github.com/syntasso/kratix/lib/writers"
 	"github.com/syntasso/kratix/lib/writers/dispatch"
 )
 
@@ -120,6 +121,31 @@ var _ = Describe("GitBackend integration", func() {
 			Expect(err).NotTo(HaveOccurred(), "file %s should exist", ri.Writes.ToCreate[0].Filepath)
 			Expect(string(body)).To(Equal(ri.Writes.ToCreate[0].Content))
 		}
+	})
+
+	It("quarantines a path-traversal intent and applies the rest of the batch", func() {
+		b, err := dispatch.NewGitBackend(logr.Discard(), dest, spec, creds)
+		Expect(err).NotTo(HaveOccurred())
+		defer b.Close()
+
+		// Construct an escape path with enough "../" segments to clear the
+		// writer's temp directory regardless of where the OS puts it.
+		intents := []dispatch.ResolvedIntent{
+			{Key: "wp-ok|sub", WorkPlacement: "wp-ok", SubDir: "sub", Writes: dispatch.Writes{ToCreate: []v1alpha1.Workload{{Filepath: "good.yaml", Content: "good"}}}},
+			{Key: "wp-bad|sub-bad", WorkPlacement: "wp-bad", SubDir: "sub-bad", Writes: dispatch.Writes{ToCreate: []v1alpha1.Workload{{
+				Filepath: "../../../../../../../../../../../../../../etc/passwd",
+				Content:  "nope",
+			}}}},
+		}
+		res := b.ApplyBatch(context.Background(), intents)
+		Expect(res.PerIntent["wp-ok|sub"]).NotTo(HaveOccurred())
+		Expect(res.PerIntent["wp-bad|sub-bad"]).To(MatchError(writers.ErrPathOutsideRepo))
+
+		checkout := GinkgoT().TempDir()
+		Expect(exec.Command("git", "clone", "-b", "main", bareRepo, checkout).Run()).To(Succeed())
+		body, err := os.ReadFile(filepath.Join(checkout, "state", "dest", "sub", "good.yaml"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(string(body)).To(Equal("good"))
 	})
 })
 
