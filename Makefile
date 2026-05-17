@@ -219,8 +219,14 @@ system-test: ## Recreate the clusters and run system tests
 	make quick-start
 	make -j4 run-system-test
 
+GINKGO_PROCS ?= $(shell nproc 2>/dev/null || sysctl -n hw.logicalcpu)
+
 fast-system-test: fast-quick-start ## Run the system tests without recreating the clusters
-	make -j4 run-system-test
+	$(MAKE) run-system-test-local
+
+.PHONY: run-system-test-local
+run-system-test-local: ## Run system tests without fmt/vet checks
+	PATH="$(PROJECT_DIR)/bin:${PATH}" PLATFORM_DESTINATION_IP=`docker inspect ${PLATFORM_CLUSTER_NAME}-control-plane | grep '"IPAddress": "172' | awk -F '"' '{print $$4}'` go run ${GINKGO} -v ${GINKGO_FLAGS} -r --coverprofile cover.out -p --procs=$(GINKGO_PROCS) --output-interceptor-mode=none ./test/system/
 
 # kubebuilder-tools does not yet support darwin/arm64. The following is a workaround (see https://github.com/kubernetes-sigs/controller-runtime/issues/1657)
 ARCH_FLAG =
