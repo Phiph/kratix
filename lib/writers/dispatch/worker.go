@@ -177,6 +177,8 @@ func dedupKey(intent Intent) string {
 func (w *Worker) fireBatch(pending []pendingIntent) {
 	ctx := context.Background()
 
+	w.logger.Info("dispatcher batch firing", "batchSize", len(pending))
+
 	// Collect unique read paths across the batch.
 	readSet := map[string]struct{}{}
 	for _, p := range pending {
