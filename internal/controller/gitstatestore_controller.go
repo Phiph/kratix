@@ -39,11 +39,10 @@ import (
 // GitStateStoreReconciler reconciles a GitStateStore object
 type GitStateStoreReconciler struct {
 	client.Client
-	Scheme          *runtime.Scheme
-	Log             logr.Logger
-	EventRecorder   record.EventRecorder
-	RepositoryCache RepositoryCache
-	Dispatcher      dispatch.Dispatcher
+	Scheme        *runtime.Scheme
+	Log           logr.Logger
+	EventRecorder record.EventRecorder
+	Dispatcher    dispatch.Dispatcher
 }
 
 //+kubebuilder:rbac:groups=platform.kratix.io,resources=gitstatestores,verbs=get;list;watch;create;update;patch;delete

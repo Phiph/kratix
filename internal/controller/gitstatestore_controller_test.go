@@ -67,12 +67,11 @@ var _ = Describe("GitStateStore Controller", func() {
 		fakeDispatcher.CleanupReturns(nil)
 
 		reconciler = &controller.GitStateStoreReconciler{
-			Client:          fakeK8sClient,
-			Scheme:          scheme.Scheme,
-			Log:             ctrl.Log.WithName("controllers").WithName("GitStateStore"),
-			EventRecorder:   eventRecorder,
-			RepositoryCache: controller.NewRepositoryCache(),
-			Dispatcher:      fakeDispatcher,
+			Client:        fakeK8sClient,
+			Scheme:        scheme.Scheme,
+			Log:           ctrl.Log.WithName("controllers").WithName("GitStateStore"),
+			EventRecorder: eventRecorder,
+			Dispatcher:    fakeDispatcher,
 		}
 
 		gitStateStore = &v1alpha1.GitStateStore{

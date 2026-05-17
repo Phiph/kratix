@@ -66,12 +66,11 @@ var _ = Describe("BucketStateStore Controller", func() {
 		fakeDispatcher.CleanupReturns(nil)
 
 		reconciler = &controller.BucketStateStoreReconciler{
-			Client:          fakeK8sClient,
-			Scheme:          scheme.Scheme,
-			Log:             ctrl.Log.WithName("controllers").WithName("BucketStateStore"),
-			EventRecorder:   eventRecorder,
-			RepositoryCache: controller.NewRepositoryCache(),
-			Dispatcher:      fakeDispatcher,
+			Client:        fakeK8sClient,
+			Scheme:        scheme.Scheme,
+			Log:           ctrl.Log.WithName("controllers").WithName("BucketStateStore"),
+			EventRecorder: eventRecorder,
+			Dispatcher:    fakeDispatcher,
 		}
 
 		bucketStateStore = &v1alpha1.BucketStateStore{

@@ -266,8 +266,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	repositoryCache := controller.NewRepositoryCache()
-
 	dispatcher := dispatch.NewDispatcher(dispatch.DispatcherConfig{
 		Logger:        setupLog.WithName("dispatcher"),
 		NewGitBackend: dispatch.NewGitBackend,
@@ -357,24 +355,22 @@ func main() {
 		os.Exit(1)
 	}
 	if err = (&controller.BucketStateStoreReconciler{
-		Client:          mgr.GetClient(),
-		Scheme:          mgr.GetScheme(),
-		Log:             ctrl.Log.WithName("controllers").WithName("BucketStateStoreController"),
-		EventRecorder:   mgr.GetEventRecorderFor("BucketStateStoreController"),
-		RepositoryCache: repositoryCache,
-		Dispatcher:      dispatcher,
+		Client:        mgr.GetClient(),
+		Scheme:        mgr.GetScheme(),
+		Log:           ctrl.Log.WithName("controllers").WithName("BucketStateStoreController"),
+		EventRecorder: mgr.GetEventRecorderFor("BucketStateStoreController"),
+		Dispatcher:    dispatcher,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "BucketStateStore")
 		os.Exit(1)
 	}
 
 	if err := (&controller.GitStateStoreReconciler{
-		Client:          mgr.GetClient(),
-		Scheme:          mgr.GetScheme(),
-		Log:             ctrl.Log.WithName("controllers").WithName("GitStateStore"),
-		EventRecorder:   mgr.GetEventRecorderFor("GitStateStoreController"),
-		RepositoryCache: repositoryCache,
-		Dispatcher:      dispatcher,
+		Client:        mgr.GetClient(),
+		Scheme:        mgr.GetScheme(),
+		Log:           ctrl.Log.WithName("controllers").WithName("GitStateStore"),
+		EventRecorder: mgr.GetEventRecorderFor("GitStateStoreController"),
+		Dispatcher:    dispatcher,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "GitStateStore")
 		os.Exit(1)
