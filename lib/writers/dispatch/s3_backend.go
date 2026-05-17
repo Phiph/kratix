@@ -73,6 +73,16 @@ func (s *S3Backend) Close() error { return nil }
 // current implementation is sequential; perf optimisations (batched
 // DeleteObjects, parallel puts) are deferred per spec §5.2.
 func (s *S3Backend) ApplyBatch(_ context.Context, batch []ResolvedIntent) BatchResult {
+	// TODO(perf): Optimise ApplyBatch to:
+	//   - issue PutObject calls for all intents in parallel under errgroup
+	//     with a bounded concurrency cap (e.g. 16)
+	//   - group DeleteObjects calls into chunks of 1000 (S3 batch-delete limit)
+	//     instead of issuing per-object RemoveObject calls
+	//   - share ListObjects results across intents targeting the same SubDir
+	//     (one listing per unique SubDir per batch instead of one per intent)
+	//   - call BucketExists at most once per batch (or remove entirely if the
+	//     check is purely advisory)
+	// See docs/superpowers/specs/2026-05-16-write-queue-design.md §5.2.
 	res := BatchResult{PerIntent: make(map[string]error, len(batch))}
 	for _, ri := range batch {
 		_, err := s.writer.UpdateFiles(ri.SubDir, ri.WorkPlacement, ri.Writes.ToCreate, ri.Writes.ToDelete)
