@@ -347,8 +347,12 @@ func (m *nativeGitClient) RemoveDirectory(dir string) error {
 	return nil
 }
 
+// RemoveFile removes a single tracked path from the worktree and index.
+// Uses `git rm -r` so the same call works for files and directories — the
+// caller may not always know which it is (e.g. a workload Filepath that
+// happens to denote a subtree).
 func (m *nativeGitClient) RemoveFile(file string) error {
-	args := []string{"rm", "--", file}
+	args := []string{"rm", "-r", "--", file}
 	ctx := context.Background()
 	_, err := m.runCmd(ctx, args...)
 	if err != nil {
@@ -358,13 +362,15 @@ func (m *nativeGitClient) RemoveFile(file string) error {
 	return nil
 }
 
+// RemoveFiles removes multiple tracked paths in one git invocation. Uses
+// `git rm -r` so the same call handles files and directories transparently.
 func (m *nativeGitClient) RemoveFiles(files ...string) error {
 	if len(files) == 0 {
 		return nil
 	}
 
 	ctx := context.Background()
-	args := append([]string{"rm", "--"}, files...)
+	args := append([]string{"rm", "-r", "--"}, files...)
 	_, err := m.runCmd(ctx, args...)
 	if err != nil {
 		logging.Error(m.log, err, "could not remove files")
