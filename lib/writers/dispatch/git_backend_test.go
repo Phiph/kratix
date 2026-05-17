@@ -174,6 +174,22 @@ var _ = Describe("GitBackend integration", func() {
 		Expect(res2.PerIntent["b|sub-b"]).To(MatchError(dispatch.ErrBatchFailed))
 		Expect(res2.PerIntent["c|sub-c"]).To(MatchError(dispatch.ErrBatchFailed))
 	})
+
+	It("Reads a file after ApplyBatch writes it", func() {
+		b, err := dispatch.NewGitBackend(logr.Discard(), dest, spec, creds)
+		Expect(err).NotTo(HaveOccurred())
+		defer b.Close()
+
+		res := b.ApplyBatch(context.Background(), []dispatch.ResolvedIntent{{
+			Key: "wp|sub", WorkPlacement: "wp", SubDir: "sub",
+			Writes: dispatch.Writes{ToCreate: []v1alpha1.Workload{{Filepath: "config.yaml", Content: "hello"}}},
+		}})
+		Expect(res.PerIntent["wp|sub"]).NotTo(HaveOccurred())
+
+		out, err := b.Read(context.Background(), []string{"sub/config.yaml"})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(out).To(HaveKeyWithValue("sub/config.yaml", []byte("hello")))
+	})
 })
 
 func runGit(dir string, args ...string) {
