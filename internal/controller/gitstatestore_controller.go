@@ -20,8 +20,6 @@ import (
 	"context"
 
 	"github.com/go-logr/logr"
-	"github.com/syntasso/kratix/api/v1alpha1"
-	"github.com/syntasso/kratix/internal/logging"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -32,6 +30,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+
+	"github.com/syntasso/kratix/api/v1alpha1"
+	"github.com/syntasso/kratix/internal/logging"
+	"github.com/syntasso/kratix/lib/writers/dispatch"
 )
 
 // GitStateStoreReconciler reconciles a GitStateStore object
@@ -41,6 +43,7 @@ type GitStateStoreReconciler struct {
 	Log             logr.Logger
 	EventRecorder   record.EventRecorder
 	RepositoryCache RepositoryCache
+	Dispatcher      dispatch.Dispatcher
 }
 
 //+kubebuilder:rbac:groups=platform.kratix.io,resources=gitstatestores,verbs=get;list;watch;create;update;patch;delete
@@ -72,7 +75,7 @@ func (r *GitStateStoreReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	})
 }
 
-func (r *GitStateStoreReconciler) newReconcileContext(ctx context.Context, logger logr.Logger, req ctrl.Request) (*stateStoreReconcileContext, error) { //nolint:dupl
+func (r *GitStateStoreReconciler) newReconcileContext(ctx context.Context, logger logr.Logger, req ctrl.Request) (*stateStoreReconcileContext, error) {
 	gitStateStore := &v1alpha1.GitStateStore{}
 	if err := r.Get(ctx, client.ObjectKey{Name: req.Name}, gitStateStore); err != nil {
 		if errors.IsNotFound(err) {
@@ -82,19 +85,24 @@ func (r *GitStateStoreReconciler) newReconcileContext(ctx context.Context, logge
 	}
 
 	stateStoreCtx := &stateStoreReconcileContext{
-		ctx:             ctx,
-		controller:      "GitStateStore",
-		logger:          logger.WithValues("generation", gitStateStore.GetGeneration()),
-		client:          r.Client,
-		stateStore:      gitStateStore,
-		repositoryCache: r.RepositoryCache,
-		eventRecorder:   r.EventRecorder,
+		ctx:           ctx,
+		controller:    "GitStateStore",
+		logger:        logger.WithValues("generation", gitStateStore.GetGeneration()),
+		client:        r.Client,
+		stateStore:    gitStateStore,
+		dispatcher:    r.Dispatcher,
+		eventRecorder: r.EventRecorder,
 	}
 
 	secret, err := fetchSecret(ctx, logger, r.Client, gitStateStore)
 	if err != nil {
-		if r.RepositoryCache.Cleanup(gitStateStore) != nil {
-			logging.Debug(logger, "failed to clean up repository cache")
+		key := dispatch.DestinationKey{
+			StateStoreKind: "GitStateStore",
+			StateStoreName: gitStateStore.Name,
+			Branch:         gitStateStore.Spec.Branch,
+		}
+		if cleanupErr := r.Dispatcher.Cleanup(key); cleanupErr != nil {
+			logging.Debug(logger, "failed to clean up dispatcher destination")
 		}
 		return nil, stateStoreCtx.setNotReadyStatus(err)
 	}

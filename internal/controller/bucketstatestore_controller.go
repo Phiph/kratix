@@ -20,8 +20,6 @@ import (
 	"context"
 
 	"github.com/go-logr/logr"
-	"github.com/syntasso/kratix/api/v1alpha1"
-	"github.com/syntasso/kratix/internal/logging"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -32,6 +30,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+
+	"github.com/syntasso/kratix/api/v1alpha1"
+	"github.com/syntasso/kratix/internal/logging"
+	"github.com/syntasso/kratix/lib/writers/dispatch"
 )
 
 // BucketStateStoreReconciler reconciles a BucketStateStore object
@@ -41,6 +43,7 @@ type BucketStateStoreReconciler struct {
 	Log             logr.Logger
 	EventRecorder   record.EventRecorder
 	RepositoryCache RepositoryCache
+	Dispatcher      dispatch.Dispatcher
 }
 
 //+kubebuilder:rbac:groups=platform.kratix.io,resources=bucketstatestores,verbs=get;list;watch;create;update;patch;delete
@@ -68,7 +71,7 @@ func (r *BucketStateStoreReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	})
 }
 
-func (r *BucketStateStoreReconciler) newReconcileContext(ctx context.Context, logger logr.Logger, req ctrl.Request) (*stateStoreReconcileContext, error) { //nolint:dupl
+func (r *BucketStateStoreReconciler) newReconcileContext(ctx context.Context, logger logr.Logger, req ctrl.Request) (*stateStoreReconcileContext, error) {
 	bucketStateStore := &v1alpha1.BucketStateStore{}
 	if err := r.Get(ctx, client.ObjectKey{Name: req.Name}, bucketStateStore); err != nil {
 		if errors.IsNotFound(err) {
@@ -78,19 +81,23 @@ func (r *BucketStateStoreReconciler) newReconcileContext(ctx context.Context, lo
 	}
 
 	stateStoreCtx := &stateStoreReconcileContext{
-		ctx:             ctx,
-		controller:      "BucketStateStore",
-		logger:          logger.WithValues("generation", bucketStateStore.GetGeneration()),
-		client:          r.Client,
-		stateStore:      bucketStateStore,
-		repositoryCache: r.RepositoryCache,
-		eventRecorder:   r.EventRecorder,
+		ctx:           ctx,
+		controller:    "BucketStateStore",
+		logger:        logger.WithValues("generation", bucketStateStore.GetGeneration()),
+		client:        r.Client,
+		stateStore:    bucketStateStore,
+		dispatcher:    r.Dispatcher,
+		eventRecorder: r.EventRecorder,
 	}
 
 	secret, err := fetchSecret(ctx, logger, r.Client, bucketStateStore)
 	if err != nil {
-		if r.RepositoryCache.Cleanup(bucketStateStore) != nil {
-			logging.Debug(logger, "failed to clean up repository cache")
+		key := dispatch.DestinationKey{
+			StateStoreKind: "BucketStateStore",
+			StateStoreName: bucketStateStore.Name,
+		}
+		if cleanupErr := r.Dispatcher.Cleanup(key); cleanupErr != nil {
+			logging.Debug(logger, "failed to clean up dispatcher destination")
 		}
 		return nil, stateStoreCtx.setNotReadyStatus(err)
 	}

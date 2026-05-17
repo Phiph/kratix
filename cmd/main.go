@@ -62,6 +62,7 @@ import (
 	"github.com/syntasso/kratix/internal/controller"
 	"github.com/syntasso/kratix/internal/telemetry"
 	"github.com/syntasso/kratix/lib/fetchers"
+	"github.com/syntasso/kratix/lib/writers/dispatch"
 	//+kubebuilder:scaffold:imports
 )
 
@@ -267,6 +268,12 @@ func main() {
 
 	repositoryCache := controller.NewRepositoryCache()
 
+	dispatcher := dispatch.NewDispatcher(dispatch.DispatcherConfig{
+		Logger:        setupLog.WithName("dispatcher"),
+		NewGitBackend: dispatch.NewGitBackend,
+		NewS3Backend:  dispatch.NewS3Backend,
+	})
+
 	scheduler := controller.Scheduler{
 		Client:        mgr.GetClient(),
 		Log:           ctrl.Log.WithName("controllers").WithName("Scheduler"),
@@ -355,6 +362,7 @@ func main() {
 		Log:             ctrl.Log.WithName("controllers").WithName("BucketStateStoreController"),
 		EventRecorder:   mgr.GetEventRecorderFor("BucketStateStoreController"),
 		RepositoryCache: repositoryCache,
+		Dispatcher:      dispatcher,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "BucketStateStore")
 		os.Exit(1)
@@ -366,6 +374,7 @@ func main() {
 		Log:             ctrl.Log.WithName("controllers").WithName("GitStateStore"),
 		EventRecorder:   mgr.GetEventRecorderFor("GitStateStoreController"),
 		RepositoryCache: repositoryCache,
+		Dispatcher:      dispatcher,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "GitStateStore")
 		os.Exit(1)
