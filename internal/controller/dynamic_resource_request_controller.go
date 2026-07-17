@@ -1702,10 +1702,10 @@ func (r *DynamicResourceRequestController) reconcileWatchCircuitCondition(ctx co
 	// spamming every Probing tick.
 	switch {
 	case currentStatus != "True" && desiredStatus == "True" && state == circuit.StateOpen:
-		r.EventRecorder.Event(rr, v1.EventTypeWarning, "CircuitBreakerOpen",
+		r.EventRecorder.Eventf(rr, nil, v1.EventTypeWarning, "CircuitBreakerOpen", "CircuitBreakerOpen", "%s",
 			"Per-resource circuit breaker tripped; events for this resource are being dropped at enqueue.")
 	case currentStatus == "True" && desiredStatus == "False":
-		r.EventRecorder.Event(rr, v1.EventTypeNormal, "CircuitBreakerClosed",
+		r.EventRecorder.Eventf(rr, nil, v1.EventTypeNormal, "CircuitBreakerClosed", "CircuitBreakerClosed", "%s",
 			"Per-resource circuit breaker recovered; events for this resource are flowing again.")
 	}
 }
